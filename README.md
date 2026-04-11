@@ -58,6 +58,16 @@ JSONL where each line is a JSON list of token strings:
 ["tokenA", "tokenB"]
 ```
 
+## References
+
+1. Williams (1992). [Simple statistical gradient-following algorithms for connectionist reinforcement learning](https://link.springer.com/article/10.1007/BF00992696). *Machine Learning* 8:229-256.
+2. Olivecrona et al. (2017). [Molecular de novo design through deep reinforcement learning](https://doi.org/10.1186/s13321-017-0235-x). *J. Cheminformatics* 9:48.
+3. Popova et al. (2018). [Deep reinforcement learning for de novo drug design](https://doi.org/10.1126/sciadv.aap7885). *Science Advances* 4:eaap7885.
+4. Liu et al. (2021). [DrugEx v2: de novo design of drug molecules by Pareto-based multi-objective reinforcement learning](https://doi.org/10.1186/s13321-021-00561-9). *J. Cheminformatics* 13:85.
+5. Fromer & Coley (2023). [Computer-aided multi-objective optimization in small molecule discovery](https://doi.org/10.1016/j.patter.2023.100678). *Patterns* 4:100678.
+6. Thomas et al. (2024). [Clustered Pareto-based reinforcement learning for molecular generation](https://doi.org/10.1016/j.neunet.2024.106282). *Neural Networks* 175:106282.
+7. Guo et al. (2025). [Augmented direct preference optimization for efficient REINFORCE finetuning of chemical language models](https://arxiv.org/abs/2501.15971). *arXiv:2501.15971*.
+
 ## Structure
 
 ```
