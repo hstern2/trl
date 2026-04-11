@@ -26,7 +26,7 @@ from trl.training.utils import (
 
 
 def _load_objectives(import_path: str) -> Objectives:
-    """Dynamically import objectives factory, e.g. 'mtrl.suite:build'."""
+    """Dynamically import objectives factory, e.g. 'mtrl.objectives:build'."""
     module_path, func_name = import_path.rsplit(":", 1)
     mod = importlib.import_module(module_path)
     return getattr(mod, func_name)()

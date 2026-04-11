@@ -72,7 +72,7 @@ def rl(
     checkpoint: str = typer.Argument(..., help="Pretrained checkpoint"),
     data: str = typer.Argument(..., help="Dataset .bin (for reference model)"),
     vocab: str = typer.Option("vocab.json"),
-    objectives: str = typer.Option(..., help="Import path to objectives factory, e.g. mtrl.suite:build"),
+    objectives: str = typer.Option(..., help="Import path to objectives factory, e.g. mtrl.objectives:build"),
     iterations: int = typer.Option(10000),
     batch_size: int = typer.Option(512, help="Total across all GPUs"),
     lr: float = typer.Option(1e-5),

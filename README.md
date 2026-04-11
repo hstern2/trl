@@ -33,7 +33,7 @@ trl sample checkpoints/best.pt --vocab vocab.json --n 5000
 
 # 4. RL fine-tune with external objectives
 torchrun --nproc_per_node=4 -m trl rl checkpoints/best.pt corpus.jsonl \
-    --vocab vocab.json --objectives mtrl.suite:build
+    --vocab vocab.json --objectives mtrl.objectives:build
 ```
 
 ## Objectives interface
@@ -48,7 +48,7 @@ class MyObjective(Objective):
         ...
 ```
 
-Then pass a `decode_fn` (token strings -> your domain object) and a list of objectives to `Objectives(...)`. The `--objectives` CLI flag accepts a Python import path to a factory function (e.g. `mypackage.suite:build`).
+Then pass a `decode_fn` (token strings -> your domain object) and a list of objectives to `Objectives(...)`. The `--objectives` CLI flag accepts a Python import path to a factory function (e.g. `mypackage.objectives:build`).
 
 ## Data format
 
