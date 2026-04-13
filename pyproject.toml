@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "trl"
@@ -13,7 +13,7 @@ requires-python = ">=3.11"
 dependencies = [
     "torch>=2.1",
     "numpy",
-    "typer[all]>=0.9",
+    "typer>=0.9",
     "wandb",
     "scipy",
 ]
@@ -32,8 +32,22 @@ dev = [
 [project.scripts]
 trl = "trl.cli:app"
 
-[tool.setuptools]
-packages = { find = { include = ["trl", "trl.*"] } }
+[tool.hatch.build.targets.wheel]
+packages = ["trl"]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu121", marker = "platform_system != 'Darwin'" },
+]
+
+# flash-attn needs torch at build time but doesn't declare it
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]
 
 [tool.ruff]
 target-version = "py311"

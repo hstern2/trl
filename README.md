@@ -12,10 +12,10 @@ Domain-agnostic library for training autoregressive transformers on arbitrary to
 ## Installation
 
 ```bash
-uv pip install -e ".[dev]"
+uv sync --extra dev
 
 # With Flash Attention (CUDA only):
-uv pip install -e ".[dev,flash]"
+uv sync --extra dev --extra flash
 ```
 
 ## Usage
