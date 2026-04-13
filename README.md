@@ -28,13 +28,81 @@ trl build-vocab corpus.jsonl --output vocab.json
 torchrun --nproc_per_node=4 -m trl pretrain corpus.jsonl \
     --vocab vocab.json --epochs 10
 
-# 3. Sample
-trl sample checkpoints/best.pt --vocab vocab.json --n 5000
+# 3. Sample (vocab is loaded from checkpoint automatically)
+trl sample checkpoints/best.pt --n 5000 --temperature 0.8
 
 # 4. RL fine-tune with external objectives
 torchrun --nproc_per_node=4 -m trl rl checkpoints/best.pt corpus.jsonl \
-    --vocab vocab.json --objectives mtrl.objectives:build
+    --objectives mtrl.objectives:build
 ```
+
+## CLI reference
+
+### `trl build-vocab`
+
+Build vocabulary from a JSONL corpus.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `CORPUS` (arg) | required | JSONL file, each line a JSON list of token strings |
+| `--output` | `vocab.json` | Output vocab JSON path |
+| `--min-freq` | `1` | Minimum token frequency to include |
+
+### `trl pretrain`
+
+Pretrain (next-token prediction). Launch with `torchrun --nproc_per_node=N -m trl pretrain`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `DATA` (arg) | required | JSONL corpus file |
+| `--vocab` | `vocab.json` | Vocab JSON path |
+| `--layers` | `8` | Number of transformer layers |
+| `--d-model` | `512` | Model dimension |
+| `--heads` | `8` | Number of attention heads |
+| `--max-seq` | `192` | Maximum sequence length |
+| `--dropout` | `0.1` | Dropout rate |
+| `--epochs` | `10` | Training epochs |
+| `--batch-size` | `256` | Batch size (per-GPU) |
+| `--lr` | `3e-4` | Learning rate |
+| `--warmup-steps` | `2000` | LR warmup steps |
+| `--grad-clip` | `1.0` | Gradient clipping norm |
+| `--checkpoint-dir` | `checkpoints/` | Checkpoint output directory |
+| `--checkpoint-every` | `5000` | Save checkpoint every N steps |
+| `--wandb-project` | disabled | W&B project name |
+
+### `trl sample`
+
+Sample sequences from a trained model.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `CHECKPOINT` (arg) | required | Model checkpoint (`.pt`) |
+| `--vocab` | from checkpoint | Vocab JSON (overrides checkpoint vocab) |
+| `--n` | `1000` | Number of sequences to sample |
+| `--temperature` | `1.0` | Sampling temperature (higher = more random) |
+| `--top-k` | `0` | Top-k filtering (0 = disabled) |
+| `--output` | `samples.txt` | Output file path |
+
+### `trl rl`
+
+RL fine-tune with Pareto REINFORCE. Launch with `torchrun --nproc_per_node=N -m trl rl`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `CHECKPOINT` (arg) | required | Pretrained checkpoint |
+| `DATA` (arg) | required | Dataset for reference model |
+| `--vocab` | from checkpoint | Vocab JSON (overrides checkpoint vocab) |
+| `--objectives` | required | Import path to objectives factory (e.g. `mtrl.objectives:build`) |
+| `--iterations` | `10000` | Number of RL iterations |
+| `--batch-size` | `512` | Batch size (total across all GPUs) |
+| `--lr` | `1e-5` | Learning rate |
+| `--kl-beta` | `0.05` | KL penalty coefficient |
+| `--pareto-lambda` | `0.1` | Pareto reward mixing weight |
+| `--temperature` | `1.0` | Initial sampling temperature |
+| `--temperature-final` | `0.8` | Final sampling temperature (linear anneal) |
+| `--replay-fraction` | `0.1` | Fraction of batch from replay buffer |
+| `--checkpoint-dir` | `checkpoints_rl/` | Checkpoint output directory |
+| `--wandb-project` | disabled | W&B project name |
 
 ## Objectives interface
 

@@ -46,7 +46,7 @@ def _sequence_log_probs(
 
 def rl_train(
     checkpoint_path: str,
-    vocab_path: str,
+    vocab_path: str | None,
     objectives_path: str,
     iterations: int = 10000,
     batch_size: int = 512,
@@ -63,13 +63,19 @@ def rl_train(
     distributed = torch.distributed.is_initialized()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
-    vocab = Vocab.load(vocab_path)
-    objectives = _load_objectives(objectives_path)
-    objectives.pareto_lambda = pareto_lambda
-
     # Load pretrained model
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     config = TransformerConfig(**ckpt["config"])
+
+    if vocab_path is not None:
+        vocab = Vocab.load(vocab_path)
+    elif "vocab" in ckpt:
+        vocab = Vocab(ckpt["vocab"])
+    else:
+        raise ValueError("Checkpoint has no embedded vocab; pass --vocab explicitly")
+
+    objectives = _load_objectives(objectives_path)
+    objectives.pareto_lambda = pareto_lambda
 
     policy = TransformerLM(config).to(device)
     policy.load_state_dict(ckpt["model"])
@@ -195,12 +201,14 @@ def rl_train(
             save_checkpoint(
                 policy, optimizer, step, asdict(config),
                 str(Path(checkpoint_dir) / f"rl_step_{step}.pt"),
+                vocab=vocab.token_to_id,
             )
 
     # Save final checkpoint
     save_checkpoint(
         policy, optimizer, iterations, asdict(config),
         str(Path(checkpoint_dir) / "rl_final.pt"),
+        vocab=vocab.token_to_id,
     )
 
     if wandb_run:

@@ -52,8 +52,9 @@ def save_checkpoint(
     step: int,
     config: Any,
     path: str,
+    vocab: dict[str, int] | None = None,
 ) -> None:
-    """Save model checkpoint."""
+    """Save model checkpoint (with optional vocab for self-contained checkpoints)."""
     if not is_main():
         return
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +64,8 @@ def save_checkpoint(
         "step": step,
         "config": config,
     }
+    if vocab is not None:
+        state["vocab"] = vocab
     torch.save(state, path)
 
 

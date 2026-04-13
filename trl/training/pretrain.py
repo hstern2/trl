@@ -111,6 +111,7 @@ def pretrain(
                 save_checkpoint(
                     model, optimizer, step, asdict(config),
                     str(Path(checkpoint_dir) / f"step_{step}.pt"),
+                    vocab=vocab.token_to_id,
                 )
 
         avg_loss = epoch_loss / max(1, epoch_tokens)
@@ -122,6 +123,7 @@ def pretrain(
             save_checkpoint(
                 model, optimizer, step, asdict(config),
                 str(Path(checkpoint_dir) / "best.pt"),
+                vocab=vocab.token_to_id,
             )
 
     if wandb_run:

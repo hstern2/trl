@@ -1497,7 +1497,7 @@ requires-dist = [
     { name = "scipy" },
     { name = "torch", marker = "sys_platform != 'darwin'", specifier = ">=2.1", index = "https://download.pytorch.org/whl/cu121" },
     { name = "torch", marker = "sys_platform == 'darwin'", specifier = ">=2.1" },
-    { name = "typer", extras = ["all"], specifier = ">=0.9" },
+    { name = "typer", specifier = ">=0.9" },
     { name = "wandb" },
 ]
 provides-extras = ["flash", "dev"]
