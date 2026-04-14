@@ -12,6 +12,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "torch>=2.1",
+    "triton>=2.1; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    # triton imports setuptools at runtime but doesn't declare it.
+    "setuptools; platform_system == 'Linux' and platform_machine == 'x86_64'",
     "numpy",
     "typer>=0.9",
     "wandb",
