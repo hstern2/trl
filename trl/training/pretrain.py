@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def pretrain(
     grad_clip: float = 1.0,
     checkpoint_dir: str = "checkpoints/",
     checkpoint_every: int = 5000,
+    log_every: int = 50,
     wandb_project: str | None = None,
 ) -> None:
     local_rank = setup_ddp()
@@ -54,8 +56,6 @@ def pretrain(
     )
 
     model = TransformerLM(config).to(device)
-    if device.type == "cuda":
-        model = model.to(torch.bfloat16)
     if distributed:
         model = DDP(model, device_ids=[local_rank])
 
@@ -65,7 +65,24 @@ def pretrain(
     total_steps = len(loader) * epochs
     scheduler = get_lr_scheduler(optimizer, warmup_steps, total_steps)
 
-    loss_fn = nn.CrossEntropyLoss(ignore_index=PAD)
+    loss_fn = nn.CrossEntropyLoss(ignore_index=PAD, label_smoothing=0.1)
+    use_amp = device.type == "cuda"
+
+    n_params = sum(p.numel() for p in model.parameters())
+    steps_per_epoch = len(loader)
+    if is_main():
+        ws = torch.distributed.get_world_size() if distributed else 1
+        print(
+            f"[setup] params={n_params / 1e6:.2f}M vocab={vocab.size} "
+            f"layers={layers} d_model={d_model} heads={heads} max_seq={max_seq}",
+            flush=True,
+        )
+        print(
+            f"[setup] dataset={len(dataset)} seqs  batch={batch_size}×{ws}  "
+            f"steps/epoch={steps_per_epoch}  total_steps={total_steps}  "
+            f"warmup={warmup_steps}  lr={lr:g}  device={device}",
+            flush=True,
+        )
 
     # Optional wandb
     wandb_run = None
@@ -78,9 +95,17 @@ def pretrain(
     best_loss = float("inf")
     Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
+    t_window = time.perf_counter()
+    tokens_window = 0
+    loss_window = 0.0
+    loss_window_tokens = 0
+
     for epoch in range(epochs):
         if distributed and hasattr(loader.sampler, "set_epoch"):
             loader.sampler.set_epoch(epoch)
+
+        if is_main():
+            print(f"[epoch {epoch + 1}/{epochs}] start", flush=True)
 
         model.train()
         epoch_loss = 0.0
@@ -90,22 +115,43 @@ def pretrain(
             inputs = inputs.to(device)
             targets = targets.to(device)
 
-            logits, _ = model(inputs)
-            loss = loss_fn(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+                logits, _ = model(inputs)
+                loss = loss_fn(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
 
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
             scheduler.step()
 
             n_tokens = (targets != PAD).sum().item()
             epoch_loss += loss.item() * n_tokens
             epoch_tokens += n_tokens
+            loss_window += loss.item() * n_tokens
+            loss_window_tokens += n_tokens
+            tokens_window += n_tokens
             step += 1
 
             if wandb_run:
                 wandb_run.log({"loss": loss.item(), "lr": scheduler.get_last_lr()[0]}, step=step)
+
+            if is_main() and log_every and step % log_every == 0:
+                dt = time.perf_counter() - t_window
+                tps = tokens_window / dt if dt > 0 else 0.0
+                avg_loss_window = loss_window / max(1, loss_window_tokens)
+                cur_lr = scheduler.get_last_lr()[0]
+                epoch_step = (step - 1) % steps_per_epoch + 1
+                print(
+                    f"[epoch {epoch + 1}/{epochs}] step {step}/{total_steps} "
+                    f"({epoch_step}/{steps_per_epoch})  loss={avg_loss_window:.4f}  "
+                    f"lr={cur_lr:.2e}  grad={grad_norm:.2f}  tok/s={tps:,.0f}",
+                    flush=True,
+                )
+                t_window = time.perf_counter()
+                tokens_window = 0
+                loss_window = 0.0
+                loss_window_tokens = 0
 
             if checkpoint_every and step % checkpoint_every == 0:
                 save_checkpoint(
@@ -113,10 +159,16 @@ def pretrain(
                     str(Path(checkpoint_dir) / f"step_{step}.pt"),
                     vocab=vocab.token_to_id,
                 )
+                if is_main():
+                    print(f"[ckpt] saved step_{step}.pt", flush=True)
 
         avg_loss = epoch_loss / max(1, epoch_tokens)
         if is_main():
-            print(f"Epoch {epoch + 1}/{epochs}  loss={avg_loss:.4f}")
+            print(
+                f"[epoch {epoch + 1}/{epochs}] done  avg_loss={avg_loss:.4f}  "
+                f"tokens={epoch_tokens:,}",
+                flush=True,
+            )
 
         if avg_loss < best_loss:
             best_loss = avg_loss
@@ -125,6 +177,8 @@ def pretrain(
                 str(Path(checkpoint_dir) / "best.pt"),
                 vocab=vocab.token_to_id,
             )
+            if is_main():
+                print(f"[ckpt] saved best.pt (loss={best_loss:.4f})", flush=True)
 
     if wandb_run:
         wandb_run.finish()

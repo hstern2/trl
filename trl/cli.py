@@ -1,6 +1,10 @@
 import typer
 
-app = typer.Typer(help="trl: token-sequence transformer + RL")
+app = typer.Typer(
+    help="trl: token-sequence transformer + RL",
+    add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 
 
 @app.command()
@@ -43,6 +47,7 @@ def pretrain(
     grad_clip: float = typer.Option(1.0, help="Gradient clipping norm"),
     checkpoint_dir: str = typer.Option("checkpoints/", help="Checkpoint output directory"),
     checkpoint_every: int = typer.Option(5000, help="Save checkpoint every N steps"),
+    log_every: int = typer.Option(50, help="Print progress every N steps (0 to disable)"),
     wandb_project: str | None = typer.Option(None, help="W&B project name (disabled if unset)"),
 ) -> None:
     """Pretrain (next-token). Launch: torchrun --nproc_per_node=N -m trl pretrain DATA"""
@@ -63,6 +68,7 @@ def pretrain(
         grad_clip=grad_clip,
         checkpoint_dir=checkpoint_dir,
         checkpoint_every=checkpoint_every,
+        log_every=log_every,
         wandb_project=wandb_project,
     )
 
@@ -108,12 +114,13 @@ def rl(
 def sample(
     checkpoint: str = typer.Argument(..., help="Model checkpoint (.pt)"),
     vocab: str = typer.Option(None, help="Vocab JSON (default: use vocab from checkpoint)"),
-    n: int = typer.Option(1000, help="Number of sequences to sample"),
+    n_samples: int = typer.Option(1000, "-n", "--n_samples", help="Number of sequences to sample"),
     temperature: float = typer.Option(1.0, help="Sampling temperature (higher = more random)"),
     top_k: int = typer.Option(0, help="Top-k filtering (0 = disabled)"),
-    output: str = typer.Option("samples.txt", help="Output file path"),
 ) -> None:
-    """Sample sequences from a trained model."""
+    """Sample sequences from a trained model; writes concatenated tokens to stdout."""
+    import sys
+
     import torch
 
     from trl.data.vocab import Vocab
@@ -132,13 +139,10 @@ def sample(
 
     config = TransformerConfig(**ckpt["config"])
     model = TransformerLM(config).to(device)
-    model.load_state_dict(ckpt["model"])
+    state = {k.removeprefix("module."): val for k, val in ckpt["model"].items()}
+    model.load_state_dict(state)
 
-    sequences = _sample(model, n, temperature=temperature, top_k=top_k, device=device)
+    sequences = _sample(model, n_samples, temperature=temperature, top_k=top_k, device=device)
 
-    with open(output, "w") as f:
-        for seq in sequences:
-            tokens = v.decode(seq)
-            f.write(" ".join(tokens) + "\n")
-
-    typer.echo(f"Wrote {len(sequences)} samples to {output}")
+    for seq in sequences:
+        sys.stdout.write("".join(v.decode(seq)) + "\n")

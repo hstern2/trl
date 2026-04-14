@@ -58,8 +58,8 @@ class Attention(nn.Module):
         # Apply RoPE
         offset = 0 if kv_cache is None else kv_cache[0].shape[2]
         cos, sin = self.rope(T, offset=offset)
-        cos = cos.to(q.dtype)
-        sin = sin.to(q.dtype)
+        cos = cos.to(q.dtype).unsqueeze(1)  # (T, 1, head_dim//2) for broadcast over n_heads
+        sin = sin.to(q.dtype).unsqueeze(1)
         q = apply_rotary(q, cos, sin)
         k = apply_rotary(k, cos, sin)
 
