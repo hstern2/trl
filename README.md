@@ -4,8 +4,8 @@ Domain-agnostic library for training autoregressive transformers on arbitrary to
 
 ## Architecture
 
-- **Decoder-only transformer** (~25-30M params): 8 layers, 512 d_model, 8 heads, RoPE, SiLU FFN, RMSNorm, weight-tied LM head. Falls back from Flash Attention to `F.scaled_dot_product_attention` when flash-attn is unavailable.
-- **Pretrain**: next-token prediction with DDP, cosine LR with warmup, bfloat16, gradient clipping, wandb logging.
+- **Decoder-only transformer**: RoPE, SwiGLU FFN, RMSNorm, weight-tied LM head, depth-scaled residual init. Falls back from Flash Attention to `F.scaled_dot_product_attention` when flash-attn is unavailable.
+- **Pretrain**: next-token prediction with DDP, `torch.compile`, cosine LR + warmup, bf16 autocast with fp32 master weights, label smoothing, z-loss, gradient clipping, step-budget training with deterministic hash-based val split and val-loss early stopping, wandb logging.
 - **RL fine-tune**: REINFORCE with Pareto-ranked rewards (NSGA-II + crowding distance), KL penalty against a frozen reference model, learned value baseline, and a replay buffer.
 - **Sampling**: temperature, top-k, top-p with KV-cache decoding.
 
@@ -21,32 +21,54 @@ uv sync --extra dev --extra flash
 ## Usage
 
 ```bash
-# 1. Build vocabulary from JSONL (each line: JSON list of token strings)
-trl build-vocab corpus.jsonl --output vocab.json
+# 1. Build vocabulary from one or more JSONL files
+#    (each line: JSON list of token strings)
+trl build-vocab corpus1.jsonl corpus2.jsonl --output vocab.json
 
-# 2. Pretrain (4x GPU)
-torchrun --nproc_per_node=4 -m trl pretrain corpus.jsonl \
-    --vocab vocab.json --epochs 10
+# 2. Ask for a starting config based on corpus stats (Chinchilla-style)
+trl suggest corpus1.jsonl corpus2.jsonl --gpus 4
 
-# 3. Sample (vocab is loaded from checkpoint automatically)
-trl sample checkpoints/best.pt --n 5000 --temperature 0.8
+# 3. Pretrain (4x GPU). Multiple corpora are concatenated.
+torchrun --nproc_per_node=4 -m trl pretrain corpus1.jsonl corpus2.jsonl \
+    --vocab vocab.json --max-steps 30000
 
-# 4. RL fine-tune with external objectives
-torchrun --nproc_per_node=4 -m trl rl checkpoints/best.pt corpus.jsonl \
+# 4. Sample (vocab is loaded from checkpoint automatically)
+trl sample checkpoints/best.pt -n 5000 --temperature 0.8
+
+# 5. RL fine-tune with external objectives
+torchrun --nproc_per_node=4 -m trl rl checkpoints/best.pt corpus1.jsonl \
     --objectives mtrl.objectives:build
 ```
+
+`trl suggest` scans the corpus, reports token / sequence / vocab statistics,
+and prints a recommended `layers / d_model / heads / max_seq / batch_size /
+lr / warmup_steps / max_steps` aimed at a Chinchilla-style ~20 tokens per
+parameter budget with 3× slack, plus a ready-to-copy `torchrun` command.
+These are heuristics — early stopping on validation loss does the real work
+of deciding when to stop.
 
 ## CLI reference
 
 ### `trl build-vocab`
 
-Build vocabulary from a JSONL corpus.
+Build vocabulary from one or more JSONL corpora.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `CORPUS` (arg) | required | JSONL file, each line a JSON list of token strings |
+| `CORPUS` (arg) | required | One or more JSONL files (each line a JSON list of token strings) |
 | `--output` | `vocab.json` | Output vocab JSON path |
 | `--min-freq` | `1` | Minimum token frequency to include |
+
+### `trl suggest`
+
+Scan one or more JSONL corpora and print recommended training hyperparameters plus a ready-to-run `torchrun` command.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `CORPUS` (arg) | required | One or more JSONL files |
+| `--gpus` | `1` | Number of GPUs you plan to train on |
+
+Uses Chinchilla-style scaling (~20 tokens per parameter) to pick model size, derives `lr` from `d_model`, targets ~100k tokens/optimizer-step for batch size, sets `max_seq` from the 99th percentile sequence length, and budgets `max_steps` at 3× the Chinchilla target (early stopping on validation loss does the real work).
 
 ### `trl pretrain`
 
@@ -54,34 +76,40 @@ Pretrain (next-token prediction). Launch with `torchrun --nproc_per_node=N -m tr
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `DATA` (arg) | required | JSONL corpus file |
+| `DATA` (arg) | required | One or more JSONL corpus files |
 | `--vocab` | `vocab.json` | Vocab JSON path |
 | `--layers` | `8` | Number of transformer layers |
 | `--d-model` | `512` | Model dimension |
 | `--heads` | `8` | Number of attention heads |
+| `--d-ff` | `0` (auto) | FFN inner dim (0 ⇒ 8/3·d_model for SwiGLU) |
 | `--max-seq` | `192` | Maximum sequence length |
 | `--dropout` | `0.1` | Dropout rate |
-| `--epochs` | `10` | Training epochs |
+| `--max-steps` | `50000` | Max optimizer steps (early stopping may end sooner) |
 | `--batch-size` | `256` | Batch size (per-GPU) |
 | `--lr` | `3e-4` | Learning rate |
 | `--warmup-steps` | `2000` | LR warmup steps |
 | `--grad-clip` | `1.0` | Gradient clipping norm |
+| `--z-loss` | `1e-4` | Z-loss coefficient for logit stability (0 to disable) |
+| `--val-fraction` | `0.01` | Validation holdout fraction (0 to disable) |
+| `--val-every` | `500` | Evaluate on val every N steps |
+| `--patience` | `10` | Early stop after N evals with no val improvement (0 to disable) |
+| `--compile` / `--no-compile` | `--compile` | Use `torch.compile` |
 | `--checkpoint-dir` | `checkpoints/` | Checkpoint output directory |
-| `--checkpoint-every` | `5000` | Save checkpoint every N steps |
+| `--checkpoint-every` | `5000` | Save step checkpoint every N steps |
+| `--log-every` | `50` | Print progress every N steps (0 to disable) |
 | `--wandb-project` | disabled | W&B project name |
 
 ### `trl sample`
 
-Sample sequences from a trained model.
+Sample sequences from a trained model; writes concatenated tokens to stdout, one sequence per line.
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `CHECKPOINT` (arg) | required | Model checkpoint (`.pt`) |
 | `--vocab` | from checkpoint | Vocab JSON (overrides checkpoint vocab) |
-| `--n` | `1000` | Number of sequences to sample |
+| `-n`, `--n-samples` | `1000` | Number of sequences to sample |
 | `--temperature` | `1.0` | Sampling temperature (higher = more random) |
 | `--top-k` | `0` | Top-k filtering (0 = disabled) |
-| `--output` | `samples.txt` | Output file path |
 
 ### `trl rl`
 
