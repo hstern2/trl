@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from trl.model.attention import Attention
 from trl.model.positional import RotaryEmbedding
@@ -21,15 +23,17 @@ class TransformerConfig:
 
 
 class FeedForward(nn.Module):
+    """SwiGLU feed-forward: down(silu(gate(x)) * up(x))."""
+
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.0) -> None:
         super().__init__()
-        self.w1 = nn.Linear(d_model, d_ff, bias=False)
-        self.w2 = nn.Linear(d_ff, d_model, bias=False)
-        self.act = nn.SiLU()
+        self.gate = nn.Linear(d_model, d_ff, bias=False)
+        self.up = nn.Linear(d_model, d_ff, bias=False)
+        self.down = nn.Linear(d_ff, d_model, bias=False)
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.drop(self.w2(self.act(self.w1(x))))
+        return self.drop(self.down(F.silu(self.gate(x)) * self.up(x)))
 
 
 class TransformerBlock(nn.Module):
@@ -72,6 +76,12 @@ class TransformerLM(nn.Module):
         self.head.weight = self.embed.weight
 
         self.apply(self._init_weights)
+        # Depth-scaled init: shrink residual-path output projections so the
+        # variance of the residual stream stays roughly constant across depth.
+        residual_std = 0.02 / math.sqrt(2 * config.n_layers)
+        for name, p in self.named_parameters():
+            if name.endswith("attn.out.weight") or name.endswith("ff.down.weight"):
+                torch.nn.init.normal_(p, mean=0.0, std=residual_std)
 
     def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear):

@@ -20,19 +20,21 @@ class Vocab:
         self.size = len(token_to_id)
 
     @classmethod
-    def build(cls, corpus_path: str, min_freq: int = 1) -> Vocab:
-        """Build vocabulary from a JSONL corpus.
+    def build(cls, corpus_path: str | list[str], min_freq: int = 1) -> Vocab:
+        """Build vocabulary from one or more JSONL corpora.
 
         Each line is a JSON list of token strings.
         """
+        paths = [corpus_path] if isinstance(corpus_path, str) else list(corpus_path)
         counts: Counter[str] = Counter()
-        with open(corpus_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                tokens = json.loads(line)
-                counts.update(tokens)
+        for path in paths:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    tokens = json.loads(line)
+                    counts.update(tokens)
 
         token_to_id: dict[str, int] = {}
         for tok in SPECIAL_TOKENS:

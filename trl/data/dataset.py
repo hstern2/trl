@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from typing import Iterator
@@ -10,23 +11,52 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler, Sampler
 from trl.data.vocab import EOS, PAD, Vocab
 
 
-class TokenDataset(Dataset):  # type: ignore[type-arg]
-    """Dataset of token sequences from a JSONL corpus."""
+def _val_bucket(idx: int, val_fraction: float, seed: int) -> bool:
+    """Deterministic hash-based split: True if this row belongs to the val set."""
+    h = hashlib.blake2b(f"{seed}:{idx}".encode(), digest_size=8).digest()
+    return (int.from_bytes(h, "big") % 10_000) < int(val_fraction * 10_000)
 
-    def __init__(self, corpus_path: str, vocab: Vocab, max_seq: int = 192) -> None:
+
+class TokenDataset(Dataset):  # type: ignore[type-arg]
+    """Dataset of token sequences from one or more JSONL corpora.
+
+    If ``val_fraction`` > 0, rows are deterministically split by hash into
+    ``split='train'`` and ``split='val'`` subsets. Sequences longer than
+    ``max_seq`` are dropped from whichever split they would land in.
+    """
+
+    def __init__(
+        self,
+        corpus_path: str | list[str],
+        vocab: Vocab,
+        max_seq: int = 192,
+        split: str = "all",
+        val_fraction: float = 0.0,
+        seed: int = 0,
+    ) -> None:
+        assert split in ("all", "train", "val")
         self.vocab = vocab
         self.max_seq = max_seq
         self.sequences: list[list[int]] = []
 
-        with open(corpus_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                tokens = json.loads(line)
-                ids = vocab.encode(tokens)
-                if len(ids) <= max_seq:
-                    self.sequences.append(ids)
+        paths = [corpus_path] if isinstance(corpus_path, str) else list(corpus_path)
+        row = 0
+        for path in paths:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    idx = row
+                    row += 1
+                    if split != "all" and val_fraction > 0:
+                        is_val = _val_bucket(idx, val_fraction, seed)
+                        if (split == "val") != is_val:
+                            continue
+                    tokens = json.loads(line)
+                    ids = vocab.encode(tokens)
+                    if len(ids) <= max_seq:
+                        self.sequences.append(ids)
 
     def __len__(self) -> int:
         return len(self.sequences)
