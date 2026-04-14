@@ -21,73 +21,79 @@ uv sync --extra dev --extra flash
 ## Usage
 
 ```bash
-# 1. Build vocabulary from one or more JSONL files
-#    (each line: JSON list of token strings)
-trl build-vocab corpus1.jsonl corpus2.jsonl --output vocab.json
+# 1. Pretrain (4x GPU). One command: scans corpora, builds vocab, picks
+#    sensible model size / lr / batch / max_steps from corpus stats, and
+#    trains. Multiple corpora are concatenated. Any auto-chosen value can
+#    be overridden with a flag.
+torchrun --nproc_per_node=4 -m trl pretrain corpus1.jsonl corpus2.jsonl
 
-# 2. Ask for a starting config based on corpus stats (Chinchilla-style)
-trl suggest corpus1.jsonl corpus2.jsonl --gpus 4
-
-# 3. Pretrain (4x GPU). Multiple corpora are concatenated.
-torchrun --nproc_per_node=4 -m trl pretrain corpus1.jsonl corpus2.jsonl \
-    --vocab vocab.json --max-steps 30000
-
-# 4. Sample (vocab is loaded from checkpoint automatically)
+# 2. Sample (vocab is loaded from checkpoint automatically)
 trl sample checkpoints/best.pt -n 5000 --temperature 0.8
 
-# 5. RL fine-tune with external objectives
+# 3. RL fine-tune with external objectives
 torchrun --nproc_per_node=4 -m trl rl checkpoints/best.pt corpus1.jsonl \
     --objectives mtrl.objectives:build
 ```
 
-`trl suggest` scans the corpus, reports token / sequence / vocab statistics,
-and prints a recommended `layers / d_model / heads / max_seq / batch_size /
-lr / warmup_steps / max_steps` aimed at a Chinchilla-style ~20 tokens per
-parameter budget with 3× slack, plus a ready-to-copy `torchrun` command.
-These are heuristics — early stopping on validation loss does the real work
-of deciding when to stop.
+`trl pretrain` scans the corpus on startup, builds `vocab.json` if it is
+missing (or loads an existing one), and picks a Chinchilla-style starting
+configuration (~20 tokens per parameter; `lr` from `d_model`; batch aiming
+for ~100k tokens/optimizer-step; `max_seq` from the 99th-percentile length;
+`max_steps` at 3× the Chinchilla target with early stopping via validation
+loss as the real stop criterion). It then prints exactly what it decided
+and which values came from the command line vs. auto-selection. Override
+anything by passing the corresponding flag:
+
+```bash
+# Auto everything:
+torchrun --nproc_per_node=1 -m trl pretrain cod.jsonl
+
+# Keep most auto choices but force a larger model and longer budget:
+torchrun --nproc_per_node=1 -m trl pretrain cod.jsonl qmugs.jsonl \
+    --layers 8 --d-model 512 --max-steps 60000
+```
+
+Example stdout from a pretrain run:
+
+```
+[scan] reading 1 corpus file(s): cod.jsonl
+[scan] 601,994 sequences  17,899,164 tokens  (avg=29 p50=27 p99=76 max=130)  vocab=210
+[vocab] wrote vocab.json (210 tokens)
+[config] resolved hyperparameters:
+  layers        = 4          (auto)
+  d_model       = 128        (auto)
+  heads         = 4          (auto)
+  d_ff          = 384        (auto)
+  max_seq       = 80         (auto)
+  batch_size    = 1024       (auto, per GPU × 1 = 30k tokens/step)
+  lr            = 6.00e-04   (auto)
+  warmup_steps  = 200        (auto)
+  max_steps     = 3,000      (auto, ≈5.2 passes over train)
+[model] est. params = 0.88M (Chinchilla target ≈ 18M tokens for 18M available)
+```
 
 ## CLI reference
 
-### `trl build-vocab`
-
-Build vocabulary from one or more JSONL corpora.
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `CORPUS` (arg) | required | One or more JSONL files (each line a JSON list of token strings) |
-| `--output` | `vocab.json` | Output vocab JSON path |
-| `--min-freq` | `1` | Minimum token frequency to include |
-
-### `trl suggest`
-
-Scan one or more JSONL corpora and print recommended training hyperparameters plus a ready-to-run `torchrun` command.
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `CORPUS` (arg) | required | One or more JSONL files |
-| `--gpus` | `1` | Number of GPUs you plan to train on |
-
-Uses Chinchilla-style scaling (~20 tokens per parameter) to pick model size, derives `lr` from `d_model`, targets ~100k tokens/optimizer-step for batch size, sets `max_seq` from the 99th percentile sequence length, and budgets `max_steps` at 3× the Chinchilla target (early stopping on validation loss does the real work).
-
 ### `trl pretrain`
 
-Pretrain (next-token prediction). Launch with `torchrun --nproc_per_node=N -m trl pretrain`.
+Pretrain a next-token transformer on one or more JSONL corpora. Launch with `torchrun --nproc_per_node=N -m trl pretrain`.
+
+On startup, `trl pretrain` scans the corpora, builds or loads `vocab.json`, and picks sensible defaults for everything marked *auto* below from the corpus statistics (Chinchilla-style ~20 tokens per parameter). Any flag you pass overrides the corresponding auto choice; `d_ff` and `lr` are re-derived from whatever `d_model` ends up being.
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `DATA` (arg) | required | One or more JSONL corpus files |
-| `--vocab` | `vocab.json` | Vocab JSON path |
-| `--layers` | `8` | Number of transformer layers |
-| `--d-model` | `512` | Model dimension |
-| `--heads` | `8` | Number of attention heads |
-| `--d-ff` | `0` (auto) | FFN inner dim (0 ⇒ 8/3·d_model for SwiGLU) |
-| `--max-seq` | `192` | Maximum sequence length |
+| `--vocab` | `vocab.json` | Vocab JSON path (auto-built from corpus if missing) |
+| `--layers` | *auto* | Number of transformer layers |
+| `--d-model` | *auto* | Model dimension |
+| `--heads` | *auto* | Number of attention heads |
+| `--d-ff` | *auto* | FFN inner dim (auto ⇒ 8/3·d_model for SwiGLU) |
+| `--max-seq` | *auto* | Maximum sequence length (auto = 99th percentile) |
 | `--dropout` | `0.1` | Dropout rate |
-| `--max-steps` | `50000` | Max optimizer steps (early stopping may end sooner) |
-| `--batch-size` | `256` | Batch size (per-GPU) |
-| `--lr` | `3e-4` | Learning rate |
-| `--warmup-steps` | `2000` | LR warmup steps |
+| `--max-steps` | *auto* | Max optimizer steps (early stopping may end sooner) |
+| `--batch-size` | *auto* | Batch size per GPU |
+| `--lr` | *auto* | Learning rate |
+| `--warmup-steps` | *auto* | LR warmup steps |
 | `--grad-clip` | `1.0` | Gradient clipping norm |
 | `--z-loss` | `1e-4` | Z-loss coefficient for logit stability (0 to disable) |
 | `--val-fraction` | `0.01` | Validation holdout fraction (0 to disable) |

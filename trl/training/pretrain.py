@@ -53,8 +53,8 @@ def _evaluate(
 
 
 def pretrain(
-    data_path: str,
-    vocab_path: str,
+    data_path: str | list[str],
+    vocab: Vocab | str,
     layers: int = 8,
     d_model: int = 512,
     heads: int = 8,
@@ -80,7 +80,8 @@ def pretrain(
     distributed = torch.distributed.is_initialized()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
-    vocab = Vocab.load(vocab_path)
+    if isinstance(vocab, str):
+        vocab = Vocab.load(vocab)
     train_ds = TokenDataset(
         data_path, vocab, max_seq=max_seq, split="train", val_fraction=val_fraction
     )
