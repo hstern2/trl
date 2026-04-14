@@ -35,9 +35,8 @@ torchrun --nproc_per_node=4 -m trl rl checkpoints/best.pt corpus1.jsonl \
     --objectives mtrl.objectives:build
 ```
 
-`trl pretrain` scans the corpus on startup, builds `vocab.json` if it is
-missing (or loads an existing one), and picks a Chinchilla-style starting
-configuration (~20 tokens per parameter; `lr` from `d_model`; batch aiming
+`trl pretrain` scans the corpus on startup, (re)builds `vocab.json` from
+it, and picks a Chinchilla-style starting configuration (~20 tokens per parameter; `lr` from `d_model`; batch aiming
 for ~100k tokens/optimizer-step; `max_seq` from the 99th-percentile length;
 `max_steps` at 3× the Chinchilla target with early stopping via validation
 loss as the real stop criterion). It then prints exactly what it decided
@@ -83,7 +82,7 @@ On startup, `trl pretrain` scans the corpora, builds or loads `vocab.json`, and 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `DATA` (arg) | required | One or more JSONL corpus files |
-| `--vocab` | `vocab.json` | Vocab JSON path (auto-built from corpus if missing) |
+| `--vocab` | `vocab.json` | Vocab JSON output path (always rebuilt from the corpus) |
 | `--layers` | *auto* | Number of transformer layers |
 | `--d-model` | *auto* | Model dimension |
 | `--heads` | *auto* | Number of attention heads |

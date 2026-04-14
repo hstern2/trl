@@ -10,7 +10,7 @@ app = typer.Typer(
 @app.command()
 def pretrain(
     data: list[str] = typer.Argument(..., help="One or more JSONL corpus files"),
-    vocab: str = typer.Option("vocab.json", help="Vocab JSON path (auto-built from corpus if missing)"),
+    vocab: str = typer.Option("vocab.json", help="Vocab JSON output path (always built from the corpus)"),
     layers: int = typer.Option(0, help="Number of transformer layers (0 = auto from corpus size)"),
     d_model: int = typer.Option(0, help="Model dimension (0 = auto)"),
     heads: int = typer.Option(0, help="Number of attention heads (0 = auto)"),
@@ -52,7 +52,6 @@ def pretrain(
         suggest_config,
     )
     from trl.training.pretrain import pretrain as _pretrain
-    from trl.data.vocab import Vocab
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     is_main = int(os.environ.get("RANK", "0")) == 0
@@ -70,22 +69,11 @@ def pretrain(
         )
 
     vocab_path = Path(vocab)
-    if vocab_path.exists():
-        loaded = Vocab.load(str(vocab_path))
-        if loaded.size != built_vocab.size and is_main:
-            typer.echo(
-                f"[vocab] warning: existing {vocab_path} has {loaded.size} tokens "
-                f"but corpus scan produced {built_vocab.size}; using existing file"
-            )
-        vocab_obj = loaded
-        if is_main:
-            typer.echo(f"[vocab] using existing {vocab_path} ({vocab_obj.size} tokens)")
-    else:
-        vocab_obj = built_vocab
-        if is_main:
-            vocab_path.parent.mkdir(parents=True, exist_ok=True)
-            vocab_obj.save(str(vocab_path))
-            typer.echo(f"[vocab] wrote {vocab_path} ({vocab_obj.size} tokens)")
+    vocab_obj = built_vocab
+    if is_main:
+        vocab_path.parent.mkdir(parents=True, exist_ok=True)
+        vocab_obj.save(str(vocab_path))
+        typer.echo(f"[vocab] wrote {vocab_path} ({vocab_obj.size} tokens)")
 
     sug = suggest_config(stats, gpus=world_size)
 
