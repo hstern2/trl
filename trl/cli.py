@@ -91,23 +91,23 @@ def suggest(
     d_ff = max(64, (d_model * 8 // 3 + 63) // 64 * 64)
     est_params = vocab_size * d_model + layers * (4 * d_model * d_model + 3 * d_model * d_ff)
 
-    # Chinchilla again: want ~20 epochs-worth of tokens if small dataset,
-    # fewer if very large. Scale epochs so total_tokens ≈ 20 × params.
-    epochs = max(1, round((20 * est_params) / max(1, n_tokens)))
-    # Don't recommend > 40 epochs even on tiny data — diminishing returns.
-    epochs = min(epochs, 40)
-
     # LR: standard AdamW recipe is ~3e-4 for ~500-d models; scale as 1/sqrt(d).
     lr = 3e-4 * math.sqrt(512 / d_model)
-    # Batch size: aim for ~50k-200k tokens/step across all GPUs.
-    # avg_len * batch_size * gpus ≈ 100k.
+    # Batch size: aim for ~100k tokens/step across all GPUs.
     avg_len = max(1, n_tokens // max(1, n_seqs))
     per_gpu_batch = max(32, min(1024, int(100_000 / avg_len / gpus)))
-    # Round to nearest multiple of 16 for GPU friendliness.
     per_gpu_batch = max(16, (per_gpu_batch // 16) * 16)
+    tokens_per_step = per_gpu_batch * gpus * avg_len
 
-    max_seq = int(max(64, min(512, p99 // 16 * 16 + 16)))
-    warmup_steps = 1000 if n_tokens < 50_000_000 else 2000
+    # Chinchilla target tokens ≈ 20 × params; step budget = tokens / tokens-per-step.
+    # Give early-stopping some slack: cap at 3× the Chinchilla target.
+    target_tokens = int(20 * est_params)
+    max_steps = max(1000, int(3 * target_tokens / max(1, tokens_per_step)))
+    max_steps = (max_steps + 99) // 100 * 100  # round to nearest 100
+    passes_at_max = max_steps * tokens_per_step / max(1, n_tokens)
+
+    max_seq_rec = int(max(64, min(512, p99 // 16 * 16 + 16)))
+    warmup_steps = min(2000, max(200, max_steps // 20))
 
     typer.echo(
         f"Corpus stats:\n"
@@ -121,20 +121,19 @@ def suggest(
         f"  d_model:      {d_model}\n"
         f"  heads:        {heads}\n"
         f"  d_ff (auto):  {d_ff}\n"
-        f"  max_seq:      {max_seq}\n"
-        f"  est. params:  {est_params/1e6:.1f}M\n"
-        f"  batch_size:   {per_gpu_batch}  (per GPU, ×{gpus} GPUs ≈ "
-        f"{per_gpu_batch * gpus * avg_len / 1000:.0f}k tokens/step)\n"
+        f"  max_seq:      {max_seq_rec}\n"
+        f"  est. params:  {est_params/1e6:.1f}M  (Chinchilla target ≈ {target_tokens/1e6:.0f}M tokens)\n"
+        f"  batch_size:   {per_gpu_batch}  (per GPU, ×{gpus} GPUs ≈ {tokens_per_step/1000:.0f}k tokens/step)\n"
         f"  lr:           {lr:.1e}\n"
         f"  warmup_steps: {warmup_steps}\n"
-        f"  epochs (max): {epochs}   # early-stop on val_loss will usually end sooner\n"
+        f"  max_steps:    {max_steps:,}  (≈{passes_at_max:.1f} passes over train; early stop via val loss)\n"
         f"\n"
         f"Command:\n"
         f"  uv run --project ~/trl torchrun --nproc_per_node={gpus} -m trl pretrain \\\n"
         f"      {' '.join(corpus)} --vocab vocab.json \\\n"
-        f"      --layers {layers} --d_model {d_model} --heads {heads} \\\n"
-        f"      --max_seq {max_seq} --batch_size {per_gpu_batch} --lr {lr:.1e} \\\n"
-        f"      --warmup_steps {warmup_steps} --epochs {epochs}"
+        f"      --layers {layers} --d-model {d_model} --heads {heads} \\\n"
+        f"      --max-seq {max_seq_rec} --batch-size {per_gpu_batch} --lr {lr:.1e} \\\n"
+        f"      --warmup-steps {warmup_steps} --max-steps {max_steps}"
     )
 
 
@@ -158,7 +157,7 @@ def pretrain(
     d_ff: int = typer.Option(0, help="FFN inner dim (0 = 8/3*d_model for SwiGLU)"),
     max_seq: int = typer.Option(192, help="Maximum sequence length"),
     dropout: float = typer.Option(0.1, help="Dropout rate"),
-    epochs: int = typer.Option(10, help="Max training epochs (early stopping may end sooner)"),
+    max_steps: int = typer.Option(50_000, help="Max optimizer steps (early stopping may end sooner)"),
     batch_size: int = typer.Option(256, help="Batch size (per-GPU)"),
     lr: float = typer.Option(3e-4, help="Learning rate"),
     warmup_steps: int = typer.Option(2000, help="LR warmup steps"),
@@ -185,7 +184,7 @@ def pretrain(
         d_ff=d_ff if d_ff > 0 else None,
         max_seq=max_seq,
         dropout=dropout,
-        epochs=epochs,
+        max_steps=max_steps,
         batch_size=batch_size,
         lr=lr,
         warmup_steps=warmup_steps,

@@ -61,7 +61,7 @@ def pretrain(
     d_ff: int | None = None,
     max_seq: int = 192,
     dropout: float = 0.1,
-    epochs: int = 10,
+    max_steps: int = 50_000,
     batch_size: int = 256,
     lr: float = 3e-4,
     warmup_steps: int = 2000,
@@ -127,13 +127,12 @@ def pretrain(
             pin_memory=True,
         )
 
-    total_steps = len(train_loader) * epochs
-    scheduler = get_lr_scheduler(optimizer, warmup_steps, total_steps)
+    scheduler = get_lr_scheduler(optimizer, warmup_steps, max_steps)
 
     loss_fn = nn.CrossEntropyLoss(ignore_index=PAD, label_smoothing=0.1)
     use_amp = device.type == "cuda"
 
-    steps_per_epoch = len(train_loader)
+    steps_per_pass = len(train_loader)
     if is_main():
         ws = torch.distributed.get_world_size() if distributed else 1
         print(
@@ -142,9 +141,11 @@ def pretrain(
             flush=True,
         )
         val_sz = len(val_ds) if val_ds is not None else 0
+        est_passes = max_steps / max(1, steps_per_pass)
         print(
             f"[setup] train={len(train_ds):,} val={val_sz:,} seqs  batch={batch_size}×{ws}  "
-            f"steps/epoch={steps_per_epoch}  total_steps={total_steps}  "
+            f"steps/pass={steps_per_pass}  max_steps={max_steps}  "
+            f"(≈{est_passes:.2f} passes over train)  "
             f"warmup={warmup_steps}  lr={lr:g}  z_loss={z_loss:g}  "
             f"compile={compile_model}  device={device}",
             flush=True,
@@ -167,18 +168,23 @@ def pretrain(
     loss_window = 0.0
     loss_window_tokens = 0
 
-    for epoch in range(epochs):
+    data_pass = 0
+    while step < max_steps and not stop:
+        data_pass += 1
         if distributed and hasattr(train_loader.sampler, "set_epoch"):
-            train_loader.sampler.set_epoch(epoch)
+            train_loader.sampler.set_epoch(data_pass - 1)
 
         if is_main():
-            print(f"[epoch {epoch + 1}/{epochs}] start", flush=True)
+            print(f"[pass {data_pass}] start at step {step}/{max_steps}", flush=True)
 
         model.train()
-        epoch_loss = 0.0
-        epoch_tokens = 0
+        pass_loss = 0.0
+        pass_tokens = 0
 
         for inputs, targets in train_loader:
+            if step >= max_steps:
+                break
+
             inputs = inputs.to(device)
             targets = targets.to(device)
 
@@ -203,8 +209,8 @@ def pretrain(
 
             n_tokens = (targets != PAD).sum().item()
             ce_item = ce.item()
-            epoch_loss += ce_item * n_tokens
-            epoch_tokens += n_tokens
+            pass_loss += ce_item * n_tokens
+            pass_tokens += n_tokens
             loss_window += ce_item * n_tokens
             loss_window_tokens += n_tokens
             tokens_window += n_tokens
@@ -220,11 +226,10 @@ def pretrain(
                 tps = tokens_window / dt if dt > 0 else 0.0
                 avg_loss_window = loss_window / max(1, loss_window_tokens)
                 cur_lr = scheduler.get_last_lr()[0]
-                epoch_step = (step - 1) % steps_per_epoch + 1
                 print(
-                    f"[epoch {epoch + 1}/{epochs}] step {step}/{total_steps} "
-                    f"({epoch_step}/{steps_per_epoch})  loss={avg_loss_window:.4f}  "
-                    f"lr={cur_lr:.2e}  grad={grad_norm:.2f}  tok/s={tps:,.0f}",
+                    f"[pass {data_pass}] step {step}/{max_steps}  "
+                    f"loss={avg_loss_window:.4f}  lr={cur_lr:.2e}  "
+                    f"grad={grad_norm:.2f}  tok/s={tps:,.0f}",
                     flush=True,
                 )
                 t_window = time.perf_counter()
@@ -235,9 +240,7 @@ def pretrain(
             if val_loader is not None and val_every and step % val_every == 0:
                 val_loss = _evaluate(model, val_loader, device, use_amp)
                 if is_main():
-                    marker = ""
-                    if val_loss < best_val:
-                        marker = "  *new best*"
+                    marker = "  *new best*" if val_loss < best_val else ""
                     print(
                         f"[val] step {step}  val_loss={val_loss:.4f}  "
                         f"best={min(val_loss, best_val):.4f}{marker}",
@@ -276,27 +279,31 @@ def pretrain(
                 if is_main():
                     print(f"[ckpt] saved step_{step}.pt", flush=True)
 
-        if stop:
-            break
-
-        avg_loss = epoch_loss / max(1, epoch_tokens)
-        if is_main():
-            print(
-                f"[epoch {epoch + 1}/{epochs}] done  avg_train_loss={avg_loss:.4f}  "
-                f"tokens={epoch_tokens:,}",
-                flush=True,
-            )
-
-        # Fallback: if no validation split, track best by train loss
-        if val_loader is None and avg_loss < best_val:
-            best_val = avg_loss
-            save_checkpoint(
-                model, optimizer, step, asdict(config),
-                str(Path(checkpoint_dir) / "best.pt"),
-                vocab=vocab.token_to_id,
-            )
+        if pass_tokens > 0:
+            avg_loss = pass_loss / pass_tokens
             if is_main():
-                print(f"[ckpt] saved best.pt (train={best_val:.4f})", flush=True)
+                print(
+                    f"[pass {data_pass}] done at step {step}/{max_steps}  "
+                    f"avg_train_loss={avg_loss:.4f}  tokens={pass_tokens:,}",
+                    flush=True,
+                )
+            # Fallback: if no validation split, track best by train-pass loss.
+            if val_loader is None and avg_loss < best_val:
+                best_val = avg_loss
+                save_checkpoint(
+                    model, optimizer, step, asdict(config),
+                    str(Path(checkpoint_dir) / "best.pt"),
+                    vocab=vocab.token_to_id,
+                )
+                if is_main():
+                    print(f"[ckpt] saved best.pt (train={best_val:.4f})", flush=True)
+
+    if is_main():
+        print(
+            f"[done] step {step}/{max_steps}  best_val={best_val:.4f}  "
+            f"passes={data_pass}",
+            flush=True,
+        )
 
     if wandb_run:
         wandb_run.finish()
