@@ -122,7 +122,7 @@ def pretrain(
                 )
             compile_model = False
     if compile_model and device.type == "cuda":
-        model = torch.compile(model)
+        model = torch.compile(model, dynamic=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1)
 
