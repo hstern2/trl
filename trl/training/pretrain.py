@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from trl.data.dataset import TokenDataset, _collate, get_dataloader
 from trl.data.vocab import PAD, Vocab
 from trl.model.transformer import TransformerConfig, TransformerLM
+from trl.training.auto_config import default_d_ff
 from trl.training.utils import (
     cleanup_ddp,
     get_lr_scheduler,
@@ -91,10 +92,8 @@ def pretrain(
             data_path, vocab, max_seq=max_seq, split="val", val_fraction=val_fraction
         )
 
-    # SwiGLU-native default: 8/3 d_model (matches param count of a classic
-    # 4×d_model FFN with gated projections, rounded to a multiple of 64).
     if d_ff is None:
-        d_ff = max(64, (d_model * 8 // 3 + 63) // 64 * 64)
+        d_ff = default_d_ff(d_model)
 
     config = TransformerConfig(
         vocab_size=vocab.size,
@@ -251,8 +250,11 @@ def pretrain(
 
             if val_loader is not None and val_every and step % val_every == 0:
                 val_loss = _evaluate(model, val_loader, device, use_amp)
+                # Require a minimum improvement so numerical noise doesn't
+                # reset patience or churn best.pt.
+                improved = val_loss < best_val - 1e-4
                 if is_main():
-                    marker = "  *new best*" if val_loss < best_val else ""
+                    marker = "  *new best*" if improved else ""
                     print(
                         f"[val] step {step}  val_loss={val_loss:.4f}  "
                         f"best={min(val_loss, best_val):.4f}{marker}",
@@ -260,7 +262,7 @@ def pretrain(
                     )
                     if wandb_run:
                         wandb_run.log({"val_loss": val_loss}, step=step)
-                if val_loss < best_val - 1e-4:
+                if improved:
                     best_val = val_loss
                     evals_without_improve = 0
                     save_checkpoint(

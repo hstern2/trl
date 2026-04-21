@@ -97,19 +97,13 @@ class BucketedSampler(Sampler[int]):
         ]
 
     def __iter__(self) -> Iterator[int]:
-        g = torch.Generator()
-        if self.shuffle:
-            g.manual_seed(torch.randint(0, 2**31, (1,)).item())
-
-        # Shuffle within each bucket, then yield
         indices: list[int] = []
         for bucket in self.buckets:
-            bucket = list(bucket)
             if self.shuffle:
-                perm = torch.randperm(len(bucket), generator=g).tolist()
-                bucket = [bucket[i] for i in perm]
-            indices.extend(bucket)
-
+                perm = torch.randperm(len(bucket)).tolist()
+                indices.extend(bucket[i] for i in perm)
+            else:
+                indices.extend(bucket)
         return iter(indices)
 
     def __len__(self) -> int:

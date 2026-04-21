@@ -78,13 +78,26 @@ def default_lr(d_model: int) -> float:
     return 3e-4 * math.sqrt(512 / d_model)
 
 
-def suggest_config(stats: CorpusStats, gpus: int = 1) -> dict:
+def suggest_config(
+    stats: CorpusStats,
+    gpus: int = 1,
+    tokens_per_param: float = 10.0,
+) -> dict:
     """Suggest model size / lr / batch size / max_steps from corpus stats.
 
-    Chinchilla-style target of ~20 tokens per parameter for the model shape,
-    step budget at 3× that target so early stopping on val loss has room.
+    Sizing picks the candidate nearest to ``n_tokens / tokens_per_param`` params.
+    The Chinchilla compute-optimal ratio is ~20, but that optimizes training
+    compute, not generation quality: for structured-generation workloads
+    (molecules, code, music) over-parameterizing relative to Chinchilla
+    consistently produces better samples. Default 10 picks a model ~2× larger
+    than strict Chinchilla at the same data budget. Use 20 to recover the
+    compute-optimal sizing, or lower (e.g. 5) to go further past it.
+
+    Step budget trains each parameter on ~60 tokens (3× Chinchilla training
+    target) so the cosine schedule doesn't starve, but is capped at 6 passes
+    through the corpus to bound wall time.
     """
-    target_params = stats.n_tokens / 20
+    target_params = stats.n_tokens / max(1e-6, tokens_per_param)
 
     candidates = [
         # (layers, d_model, heads)
@@ -120,10 +133,15 @@ def suggest_config(stats: CorpusStats, gpus: int = 1) -> dict:
     tokens_per_step = per_gpu_batch * gpus * stats.avg_len
 
     target_tokens = int(20 * est_params)
-    max_steps = max(1000, int(3 * target_tokens / max(1, tokens_per_step)))
+    max_steps_target = int(3 * target_tokens / max(1, tokens_per_step))
+    max_passes_cap = int(6 * stats.n_tokens / max(1, tokens_per_step))
+    max_steps = max(1000, min(max_steps_target, max_passes_cap))
     max_steps = _round_multiple(max_steps, 100)
 
-    max_seq = int(max(64, min(512, _round_multiple(stats.p99, 16))))
+    # Cover the actual tail (p99 truncates 1% of sequences mid-generation,
+    # which teaches the model to emit broken endings). Cap at 256 so pathological
+    # outliers don't blow up attention memory.
+    max_seq = int(max(64, min(256, _round_multiple(stats.max_len, 16))))
     warmup_steps = min(2000, max(200, max_steps // 20))
 
     return {

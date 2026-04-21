@@ -15,7 +15,12 @@ def pretrain(
     d_model: int = typer.Option(0, help="Model dimension (0 = auto)"),
     heads: int = typer.Option(0, help="Number of attention heads (0 = auto)"),
     d_ff: int = typer.Option(0, help="FFN inner dim (0 = auto 8/3*d_model for SwiGLU)"),
-    max_seq: int = typer.Option(0, help="Maximum sequence length (0 = auto from p99 length)"),
+    max_seq: int = typer.Option(0, help="Maximum sequence length (0 = auto from max observed length, capped at 256)"),
+    tokens_per_param: float = typer.Option(
+        10.0,
+        help="Sizing ratio for auto model choice. 20 = Chinchilla compute-optimal; "
+             "10 (default) picks a ~2× larger model, which helps generation quality.",
+    ),
     dropout: float = typer.Option(0.1, help="Dropout rate"),
     max_steps: int = typer.Option(0, help="Max optimizer steps (0 = auto; early stopping may end sooner)"),
     batch_size: int = typer.Option(0, help="Batch size per GPU (0 = auto)"),
@@ -35,9 +40,10 @@ def pretrain(
     """Pretrain a next-token transformer on one or more JSONL corpora.
 
     Scans the corpus, (re)uses or builds a vocab, and picks sensible model
-    size / lr / batch / max_steps defaults from corpus statistics (Chinchilla-
-    style ~20 tokens per parameter). Any of those can be overridden with a
-    flag. Launch with:
+    size / lr / batch / max_steps defaults from corpus statistics. Auto sizing
+    targets ~10 tokens per parameter (≈2× larger than strict Chinchilla, which
+    tends to help generation quality); override with --tokens-per-param. Any
+    resolved value can be replaced with its matching flag. Launch with:
 
         torchrun --nproc_per_node=N -m trl pretrain DATA [DATA ...]
     """
@@ -75,7 +81,7 @@ def pretrain(
         vocab_obj.save(str(vocab_path))
         typer.echo(f"[vocab] wrote {vocab_path} ({vocab_obj.size} tokens)")
 
-    sug = suggest_config(stats, gpus=world_size)
+    sug = suggest_config(stats, gpus=world_size, tokens_per_param=tokens_per_param)
 
     def pick(user, auto):
         return (user, False) if user else (auto, True)
@@ -120,10 +126,12 @@ def pretrain(
         typer.echo(f"  lr            = {r_lr:<10.2e} ({tag(auto_lr)})")
         typer.echo(f"  warmup_steps  = {r_warmup:<10} ({tag(auto_warmup)})")
         typer.echo(f"  max_steps     = {r_max_steps:<10} ({tag(auto_max_steps)}, ≈{passes:.1f} passes over train)")
+        data_ratio = stats.n_tokens / max(1, est_params)
         typer.echo(
-            f"[model] est. params = {est_params/1e6:.2f}M "
-            f"(Chinchilla target ≈ {target_tokens/1e6:.0f}M tokens "
-            f"for {stats.n_tokens/1e6:.0f}M available)"
+            f"[model] est. params = {est_params/1e6:.2f}M  "
+            f"(sizing @ {tokens_per_param:.0f} tok/param; "
+            f"corpus = {data_ratio:.1f} tok/param, trained ≈{passes:.1f}× ≈ "
+            f"{passes * data_ratio:.0f} tok/param)"
         )
 
     _pretrain(
