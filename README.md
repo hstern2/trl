@@ -18,6 +18,15 @@ uv sync --extra dev
 uv sync --extra dev --extra flash
 ```
 
+`torch.compile` JIT-compiles a small C extension via Triton, which needs the
+Python development headers. On Debian/Ubuntu install them with:
+
+```bash
+sudo apt-get install python3.12-dev
+```
+
+Without it, pretrain fails at compile time with `fatal error: Python.h: No such file or directory`.
+
 ## Usage
 
 ```bash
