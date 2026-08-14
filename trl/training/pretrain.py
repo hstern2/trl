@@ -20,6 +20,7 @@ from trl.training.utils import (
     save_checkpoint,
     setup_ddp,
 )
+from trl.training.warm_start import load_warm_start
 
 
 @torch.no_grad()
@@ -76,6 +77,7 @@ def pretrain(
     checkpoint_every: int = 5000,
     log_every: int = 50,
     wandb_project: str | None = None,
+    init_checkpoint: str | None = None,
 ) -> None:
     local_rank = setup_ddp()
     distributed = torch.distributed.is_initialized()
@@ -106,6 +108,9 @@ def pretrain(
     )
 
     model = TransformerLM(config).to(device)
+    warm_start = None
+    if init_checkpoint is not None:
+        warm_start = load_warm_start(model, init_checkpoint, vocab)
     n_params = sum(p.numel() for p in model.parameters())
 
     if distributed:
@@ -151,6 +156,15 @@ def pretrain(
             f"layers={layers} d_model={d_model} d_ff={d_ff} heads={heads} max_seq={max_seq}",
             flush=True,
         )
+        if warm_start is not None:
+            print(
+                f"[init] loaded model weights from {init_checkpoint} "
+                f"(checkpoint step={warm_start.checkpoint_step:,}, "
+                f"vocab={warm_start.old_vocab_size}->{warm_start.new_vocab_size}, "
+                f"new tokens={warm_start.added_tokens}); "
+                "optimizer and LR schedule start fresh",
+                flush=True,
+            )
         val_sz = len(val_ds) if val_ds is not None else 0
         est_passes = max_steps / max(1, steps_per_pass)
         print(

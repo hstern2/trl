@@ -36,6 +36,10 @@ def pretrain(
     checkpoint_every: int = typer.Option(5000, help="Save step checkpoint every N steps"),
     log_every: int = typer.Option(50, help="Print progress every N steps (0 to disable)"),
     wandb_project: str | None = typer.Option(None, help="W&B project name (disabled if unset)"),
+    init_checkpoint: str | None = typer.Option(
+        None,
+        help="Warm-start model weights and token IDs; optimizer/scheduler start fresh",
+    ),
 ) -> None:
     """Pretrain a next-token transformer on one or more JSONL corpora.
 
@@ -58,6 +62,7 @@ def pretrain(
         suggest_config,
     )
     from trl.training.pretrain import pretrain as _pretrain
+    from trl.training.warm_start import merge_checkpoint_vocab, read_checkpoint
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     is_main = int(os.environ.get("RANK", "0")) == 0
@@ -75,11 +80,22 @@ def pretrain(
         )
 
     vocab_path = Path(vocab)
-    vocab_obj = built_vocab
+    init_state = read_checkpoint(init_checkpoint) if init_checkpoint else None
+    added_tokens: list[str] = []
+    if init_state is not None:
+        vocab_obj, added_tokens = merge_checkpoint_vocab(init_state, built_vocab)
+        stats.vocab_size = vocab_obj.size
+    else:
+        vocab_obj = built_vocab
     if is_main:
         vocab_path.parent.mkdir(parents=True, exist_ok=True)
         vocab_obj.save(str(vocab_path))
         typer.echo(f"[vocab] wrote {vocab_path} ({vocab_obj.size} tokens)")
+        if init_state is not None:
+            typer.echo(
+                f"[vocab] preserved {len(init_state['vocab'])} checkpoint token IDs; "
+                f"appended {len(added_tokens)} new token(s)"
+            )
 
     sug = suggest_config(stats, gpus=world_size, tokens_per_param=tokens_per_param)
 
@@ -107,6 +123,46 @@ def pretrain(
     else:
         r_warmup, auto_warmup = min(2000, max(200, r_max_steps // 20)), True
 
+    checkpoint_arch = init_state["config"] if init_state is not None else None
+    if checkpoint_arch is not None:
+        checkpoint_values = {
+            "layers": int(checkpoint_arch["n_layers"]),
+            "d_model": int(checkpoint_arch["d_model"]),
+            "heads": int(checkpoint_arch["n_heads"]),
+            "d_ff": int(checkpoint_arch["d_ff"]),
+        }
+        user_values = {
+            "layers": layers,
+            "d_model": d_model,
+            "heads": heads,
+            "d_ff": d_ff,
+        }
+        for name, checkpoint_value in checkpoint_values.items():
+            user_value = user_values[name]
+            if user_value and user_value != checkpoint_value:
+                raise typer.BadParameter(
+                    f"--{name.replace('_', '-')}={user_value} is incompatible with "
+                    f"initialization checkpoint value {checkpoint_value}"
+                )
+        r_layers = checkpoint_values["layers"]
+        r_d_model = checkpoint_values["d_model"]
+        r_heads = checkpoint_values["heads"]
+        r_d_ff = checkpoint_values["d_ff"]
+        auto_layers = auto_d_model = auto_heads = auto_d_ff = False
+        checkpoint_max_seq = int(checkpoint_arch["max_seq_len"])
+        if max_seq and max_seq < checkpoint_max_seq:
+            raise typer.BadParameter(
+                f"--max-seq={max_seq} cannot be smaller than checkpoint max_seq_len "
+                f"{checkpoint_max_seq}"
+            )
+        if not max_seq:
+            r_max_seq = max(checkpoint_max_seq, sug["max_seq"])
+            auto_max_seq = True
+        if lr <= 0:
+            r_lr, auto_lr = 1e-4, True
+        if warmup_steps < 0:
+            r_warmup, auto_warmup = min(1000, max(200, r_max_steps // 100)), True
+
     est_params = estimate_params(vocab_obj.size, r_layers, r_d_model, r_d_ff)
     tokens_per_step = r_batch * world_size * stats.avg_len
     passes = r_max_steps * tokens_per_step / max(1, stats.n_tokens)
@@ -115,12 +171,15 @@ def pretrain(
     def tag(is_auto: bool) -> str:
         return "auto" if is_auto else "user"
 
+    def arch_tag(is_auto: bool) -> str:
+        return "checkpoint" if checkpoint_arch is not None else tag(is_auto)
+
     if is_main:
         typer.echo("[config] resolved hyperparameters:")
-        typer.echo(f"  layers        = {r_layers:<10} ({tag(auto_layers)})")
-        typer.echo(f"  d_model       = {r_d_model:<10} ({tag(auto_d_model)})")
-        typer.echo(f"  heads         = {r_heads:<10} ({tag(auto_heads)})")
-        typer.echo(f"  d_ff          = {r_d_ff:<10} ({tag(auto_d_ff)})")
+        typer.echo(f"  layers        = {r_layers:<10} ({arch_tag(auto_layers)})")
+        typer.echo(f"  d_model       = {r_d_model:<10} ({arch_tag(auto_d_model)})")
+        typer.echo(f"  heads         = {r_heads:<10} ({arch_tag(auto_heads)})")
+        typer.echo(f"  d_ff          = {r_d_ff:<10} ({arch_tag(auto_d_ff)})")
         typer.echo(f"  max_seq       = {r_max_seq:<10} ({tag(auto_max_seq)})")
         typer.echo(f"  batch_size    = {r_batch:<10} ({tag(auto_batch)}, per GPU × {world_size} = {tokens_per_step/1000:.0f}k tokens/step)")
         typer.echo(f"  lr            = {r_lr:<10.2e} ({tag(auto_lr)})")
@@ -157,6 +216,7 @@ def pretrain(
         checkpoint_every=checkpoint_every,
         log_every=log_every,
         wandb_project=wandb_project,
+        init_checkpoint=init_checkpoint,
     )
 
 
