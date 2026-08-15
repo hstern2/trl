@@ -1,0 +1,7 @@
+[Unit]
+Description=Record AMSR continued-pretraining runtime
+After=trl-amsr.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/ubuntu/trl/ops/record_runtime.py finish --output /home/ubuntu/trl-runs/amsr-continued/runtime.json --journal-unit trl-amsr.service

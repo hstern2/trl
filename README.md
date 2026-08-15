@@ -90,7 +90,7 @@ before starting:
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp ops/trl-amsr.service ~/.config/systemd/user/
+cp ops/trl-amsr.service ops/trl-amsr-runtime-report.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now trl-amsr.service
 journalctl --user -u trl-amsr.service -f
@@ -99,7 +99,10 @@ journalctl --user -u trl-amsr.service -f
 The unit includes `--auto-resume`: on a restart it selects `last.pt`, or the
 highest numbered periodic checkpoint when `last.pt` does not yet exist. The
 original initialization checkpoint is used only when the run directory has no
-training checkpoint.
+training checkpoint. The service initializes `runtime.json` without replacing
+its original timestamp on automatic restarts. When training emits its final
+`[done]` event, `trl-amsr-runtime-report.service` records that event's timestamp
+and the exact elapsed wall-clock duration.
 
 ## Index behavior
 

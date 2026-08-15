@@ -1,12 +1,14 @@
 [Unit]
 Description=AMSR continued pretraining
 After=network-online.target
+OnSuccess=trl-amsr-runtime-report.service
 
 [Service]
 Type=simple
 WorkingDirectory=/home/ubuntu/trl
 Environment=PYTHONUNBUFFERED=1
 Environment=OMP_NUM_THREADS=1
+ExecStartPre=/usr/bin/python3 /home/ubuntu/trl/ops/record_runtime.py start --output /home/ubuntu/trl-runs/amsr-continued/runtime.json
 ExecStart=/home/ubuntu/.local/bin/uv run torchrun --standalone --nproc_per_node=2 -m trl pretrain /home/ubuntu/trl-train-3/out/corpus/train/tokens.jsonl --val-data /home/ubuntu/trl-train-3/out/corpus/validation/tokens.jsonl --vocab /home/ubuntu/trl-train-3/out/corpus/vocab.json --index-dir /home/ubuntu/trl-train-3/index --init-checkpoint /home/ubuntu/trl-train-3/checkpoints/qmugs_cod_step22000.pt --auto-resume --batch-size 256 --grad-accum-steps 2 --epochs 1 --lr 1e-4 --warmup-steps 1000 --precision fp16 --no-compile --val-every 10000 --checkpoint-every 5000 --checkpoint-dir /home/ubuntu/trl-runs/amsr-continued
 Restart=on-failure
 RestartSec=30
