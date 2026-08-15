@@ -38,9 +38,7 @@ def merge_checkpoint_vocab(
         raise ValueError("checkpoint vocabulary IDs must be contiguous from zero")
     for expected_id, token in enumerate(SPECIAL_TOKENS):
         if old.get(token) != expected_id:
-            raise ValueError(
-                f"checkpoint special token {token!r} must have ID {expected_id}"
-            )
+            raise ValueError(f"checkpoint special token {token!r} must have ID {expected_id}")
 
     added = sorted(set(corpus_vocab.token_to_id) - set(old))
     merged = dict(old)
@@ -93,10 +91,7 @@ def load_warm_start(
         if vocab.token_to_id.get(token) != old_id:
             raise ValueError(f"token ID changed for checkpoint token {token!r}")
 
-    source = {
-        _strip_wrapper_prefix(name): tensor
-        for name, tensor in checkpoint["model"].items()
-    }
+    source = {_strip_wrapper_prefix(name): tensor for name, tensor in checkpoint["model"].items()}
     target = model.state_dict()
     if "embed.weight" not in source or "head.weight" not in source:
         raise ValueError("checkpoint is missing tied embedding/head weights")

@@ -54,7 +54,7 @@ def sample(
 
         for i in range(n):
             if not finished[i]:
-                tok = next_token[i].item()
+                tok = int(next_token[i].item())
                 sequences[i].append(tok)
                 if tok == EOS:
                     finished[i] = True

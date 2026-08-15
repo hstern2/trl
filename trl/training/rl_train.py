@@ -4,8 +4,8 @@ import copy
 import importlib
 from dataclasses import asdict
 from pathlib import Path
+from typing import cast
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -77,7 +77,7 @@ def rl_train(
     objectives = _load_objectives(objectives_path)
     objectives.pareto_lambda = pareto_lambda
 
-    policy = TransformerLM(config).to(device)
+    policy: torch.nn.Module = TransformerLM(config).to(device)
     policy.load_state_dict(ckpt["model"])
     if device.type == "cuda":
         policy = policy.to(torch.bfloat16)
@@ -89,7 +89,7 @@ def rl_train(
         p.requires_grad = False
 
     # Value head
-    value_head = ValueHead(config.d_model).to(device)
+    value_head: torch.nn.Module = ValueHead(config.d_model).to(device)
     if device.type == "cuda":
         value_head = value_head.to(torch.bfloat16)
 
@@ -114,7 +114,10 @@ def rl_train(
 
         wandb_run = wandb.init(project=wandb_project, config={"rl": True, **asdict(config)})
 
-    raw_policy = policy.module if hasattr(policy, "module") else policy
+    raw_policy = cast(
+        TransformerLM,
+        policy.module if hasattr(policy, "module") else policy,
+    )
 
     for step in range(1, iterations + 1):
         # Anneal temperature
@@ -199,14 +202,20 @@ def rl_train(
 
         if step % 1000 == 0:
             save_checkpoint(
-                policy, optimizer, step, asdict(config),
+                policy,
+                optimizer,
+                step,
+                asdict(config),
                 str(Path(checkpoint_dir) / f"rl_step_{step}.pt"),
                 vocab=vocab.token_to_id,
             )
 
     # Save final checkpoint
     save_checkpoint(
-        policy, optimizer, iterations, asdict(config),
+        policy,
+        optimizer,
+        iterations,
+        asdict(config),
         str(Path(checkpoint_dir) / "rl_final.pt"),
         vocab=vocab.token_to_id,
     )

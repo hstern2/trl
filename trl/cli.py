@@ -10,106 +10,255 @@ app = typer.Typer(
 @app.command()
 def pretrain(
     data: list[str] = typer.Argument(..., help="One or more JSONL corpus files"),
-    vocab: str = typer.Option("vocab.json", help="Vocab JSON output path (always built from the corpus)"),
-    layers: int = typer.Option(0, help="Number of transformer layers (0 = auto from corpus size)"),
+    val_data: list[str] = typer.Option(
+        [],
+        "--val-data",
+        help="Frozen validation JSONL file; repeat for multiple files",
+    ),
+    vocab: str = typer.Option(
+        "vocab.json",
+        help="Existing vocabulary, or output path when one must be built",
+    ),
+    index_dir: str = typer.Option(
+        ".trl-index",
+        help="Directory for reusable memory-mapped corpus indices",
+    ),
+    rebuild_index: bool = typer.Option(
+        False,
+        "--rebuild-index",
+        help="Rebuild indices even when their source fingerprints match",
+    ),
+    layers: int = typer.Option(
+        0,
+        help="Number of transformer layers (0 = auto or checkpoint)",
+    ),
     d_model: int = typer.Option(0, help="Model dimension (0 = auto)"),
     heads: int = typer.Option(0, help="Number of attention heads (0 = auto)"),
     d_ff: int = typer.Option(0, help="FFN inner dim (0 = auto 8/3*d_model for SwiGLU)"),
-    max_seq: int = typer.Option(0, help="Maximum sequence length (0 = auto from max observed length, capped at 256)"),
+    max_seq: int = typer.Option(
+        0,
+        help="Maximum sequence length (0 = cover corpus and checkpoint)",
+    ),
     tokens_per_param: float = typer.Option(
         10.0,
-        help="Sizing ratio for auto model choice. 20 = Chinchilla compute-optimal; "
-             "10 (default) picks a ~2× larger model, which helps generation quality.",
+        help="Sizing ratio for automatic model selection",
     ),
     dropout: float = typer.Option(0.1, help="Dropout rate"),
-    max_steps: int = typer.Option(0, help="Max optimizer steps (0 = auto; early stopping may end sooner)"),
-    batch_size: int = typer.Option(0, help="Batch size per GPU (0 = auto)"),
+    epochs: float = typer.Option(1.0, help="Training passes when --max-steps is omitted"),
+    max_steps: int = typer.Option(0, help="Optimizer-step limit (0 = derive from epochs)"),
+    batch_size: int = typer.Option(0, help="Microbatch sequences per GPU (0 = auto)"),
+    grad_accum_steps: int = typer.Option(
+        0,
+        help="Microbatches per optimizer step (0 = target global batch)",
+    ),
+    global_batch_sequences: int = typer.Option(
+        1024,
+        help="Target global sequence batch when accumulation is automatic",
+    ),
     lr: float = typer.Option(0.0, help="Learning rate (0 = auto)"),
     warmup_steps: int = typer.Option(-1, help="LR warmup steps (-1 = auto)"),
+    weight_decay: float = typer.Option(0.1, help="AdamW weight decay"),
+    label_smoothing: float = typer.Option(0.1, help="Cross-entropy label smoothing"),
     grad_clip: float = typer.Option(1.0, help="Gradient clipping norm"),
-    z_loss: float = typer.Option(1e-4, help="Z-loss coefficient for logit stability (0 to disable)"),
-    val_fraction: float = typer.Option(0.01, help="Validation holdout fraction (0 to disable)"),
-    val_every: int = typer.Option(500, help="Evaluate on val every N steps"),
-    patience: int = typer.Option(10, help="Early stop after N evals with no val improvement (0 to disable)"),
+    z_loss: float = typer.Option(
+        1e-4,
+        help="Z-loss coefficient for logit stability (0 to disable)",
+    ),
+    val_every: int = typer.Option(10_000, help="Run full validation every N optimizer steps"),
+    patience: int = typer.Option(
+        10,
+        help="Early stop after N evals with no val improvement (0 to disable)",
+    ),
+    precision: str = typer.Option(
+        "auto",
+        help="auto, fp16, bf16, or fp32 (auto uses FP16 on V100)",
+    ),
     compile_model: bool = typer.Option(True, "--compile/--no-compile", help="Use torch.compile"),
     checkpoint_dir: str = typer.Option("checkpoints/", help="Checkpoint output directory"),
     checkpoint_every: int = typer.Option(5000, help="Save step checkpoint every N steps"),
     log_every: int = typer.Option(50, help="Print progress every N steps (0 to disable)"),
+    num_workers: int = typer.Option(4, help="Data-loading worker processes per rank"),
+    seed: int = typer.Option(0, help="Training and bounded-shuffle seed"),
     wandb_project: str | None = typer.Option(None, help="W&B project name (disabled if unset)"),
     init_checkpoint: str | None = typer.Option(
         None,
         help="Warm-start model weights and token IDs; optimizer/scheduler start fresh",
     ),
+    resume: str | None = typer.Option(
+        None,
+        help="Resume a version-2 training checkpoint exactly",
+    ),
+    auto_resume: bool = typer.Option(
+        False,
+        "--auto-resume",
+        help="Resume last.pt or the newest periodic checkpoint when present",
+    ),
 ) -> None:
-    """Pretrain a next-token transformer on one or more JSONL corpora.
-
-    Scans the corpus, (re)uses or builds a vocab, and picks sensible model
-    size / lr / batch / max_steps defaults from corpus statistics. Auto sizing
-    targets ~10 tokens per parameter (≈2× larger than strict Chinchilla, which
-    tends to help generation quality); override with --tokens-per-param. Any
-    resolved value can be replaced with its matching flag. Launch with:
-
-        torchrun --nproc_per_node=N -m trl pretrain DATA [DATA ...]
-    """
+    """Pretrain on indexed JSONL without materializing the corpus in RAM."""
+    import math
     import os
     from pathlib import Path
 
+    import torch
+
+    from trl.data.dataset import IndexMetadata, build_index
+    from trl.data.vocab import Vocab
     from trl.training.auto_config import (
+        CorpusStats,
         default_d_ff,
         default_lr,
-        estimate_params,
         scan_corpora,
         suggest_config,
     )
     from trl.training.pretrain import pretrain as _pretrain
+    from trl.training.utils import cleanup_ddp, setup_ddp
     from trl.training.warm_start import merge_checkpoint_vocab, read_checkpoint
 
+    if auto_resume and resume:
+        raise typer.BadParameter("--auto-resume and --resume are mutually exclusive")
+    if auto_resume:
+        checkpoint_root = Path(checkpoint_dir)
+        last_checkpoint = checkpoint_root / "last.pt"
+        if last_checkpoint.is_file():
+            resume = str(last_checkpoint)
+        else:
+            periodic: list[tuple[int, Path]] = []
+            for candidate in checkpoint_root.glob("step_*.pt"):
+                try:
+                    periodic.append((int(candidate.stem.removeprefix("step_")), candidate))
+                except ValueError:
+                    continue
+            if periodic:
+                resume = str(max(periodic)[1])
+        if resume is not None:
+            init_checkpoint = None
+            typer.echo(f"[auto-resume] selected {resume}")
+    if init_checkpoint and resume:
+        raise typer.BadParameter("--init-checkpoint and --resume are mutually exclusive")
+    if epochs <= 0:
+        raise typer.BadParameter("--epochs must be positive")
+    if global_batch_sequences <= 0:
+        raise typer.BadParameter("--global-batch-sequences must be positive")
+
+    setup_ddp()
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     is_main = int(os.environ.get("RANK", "0")) == 0
+    distributed = torch.distributed.is_initialized()
 
-    if is_main:
-        typer.echo(
-            f"[scan] reading {len(data)} corpus file(s): {', '.join(data)}"
-        )
-    stats, built_vocab = scan_corpora(data)
-    if is_main:
-        typer.echo(
-            f"[scan] {stats.n_seqs:,} sequences  {stats.n_tokens:,} tokens  "
-            f"(avg={stats.avg_len} p50={stats.p50} p99={stats.p99} max={stats.max_len})  "
-            f"vocab={stats.vocab_size}"
-        )
+    def barrier() -> None:
+        if not distributed:
+            return
+        if torch.cuda.is_available():
+            torch.distributed.barrier(device_ids=[int(os.environ.get("LOCAL_RANK", "0"))])
+        else:
+            torch.distributed.barrier()
+
+    checkpoint_path = resume or init_checkpoint
+    checkpoint_state = read_checkpoint(checkpoint_path) if checkpoint_path else None
+    resume_run = checkpoint_state.get("run_config", {}) if resume and checkpoint_state else {}
 
     vocab_path = Path(vocab)
-    init_state = read_checkpoint(init_checkpoint) if init_checkpoint else None
-    added_tokens: list[str] = []
-    if init_state is not None:
-        vocab_obj, added_tokens = merge_checkpoint_vocab(init_state, built_vocab)
-        stats.vocab_size = vocab_obj.size
+    if not vocab_path.exists():
+        if is_main:
+            typer.echo(f"[vocab] scanning {len(data) + len(val_data)} corpus file(s)")
+            _, built_vocab = scan_corpora([*data, *val_data])
+            if checkpoint_state is not None:
+                vocab_obj, _ = merge_checkpoint_vocab(checkpoint_state, built_vocab)
+            else:
+                vocab_obj = built_vocab
+            vocab_path.parent.mkdir(parents=True, exist_ok=True)
+            vocab_obj.save(str(vocab_path))
+        barrier()
+    corpus_vocab = Vocab.load(str(vocab_path))
+    if resume and checkpoint_state is not None:
+        vocab_obj = Vocab(dict(checkpoint_state["vocab"]))
+        if corpus_vocab.token_to_id != vocab_obj.token_to_id:
+            raise typer.BadParameter(
+                "--vocab does not exactly match the resume checkpoint vocabulary"
+            )
+        added_tokens: list[str] = []
+    elif checkpoint_state is not None:
+        vocab_obj, added_tokens = merge_checkpoint_vocab(checkpoint_state, corpus_vocab)
+        if vocab_obj.token_to_id != corpus_vocab.token_to_id:
+            raise typer.BadParameter(
+                "the existing --vocab does not preserve checkpoint token IDs; "
+                "provide a compatible merged vocabulary"
+            )
     else:
-        vocab_obj = built_vocab
+        vocab_obj = corpus_vocab
+        added_tokens = []
+
     if is_main:
-        vocab_path.parent.mkdir(parents=True, exist_ok=True)
-        vocab_obj.save(str(vocab_path))
-        typer.echo(f"[vocab] wrote {vocab_path} ({vocab_obj.size} tokens)")
-        if init_state is not None:
+        typer.echo(f"[vocab] {vocab_path} ({vocab_obj.size} tokens)")
+        if checkpoint_state is not None and not resume:
             typer.echo(
-                f"[vocab] preserved {len(init_state['vocab'])} checkpoint token IDs; "
-                f"appended {len(added_tokens)} new token(s)"
+                f"[vocab] preserved {len(checkpoint_state['vocab'])} checkpoint IDs; "
+                f"new tokens={len(added_tokens)}"
+            )
+        typer.echo(
+            f"[index] {'building or validating' if rebuild_index else 'validating or reusing'} "
+            f"indices in {index_dir}"
+        )
+
+    if is_main:
+        train_metadata = build_index(
+            data,
+            vocab_obj,
+            index_dir,
+            "train",
+            force=rebuild_index,
+            progress=True,
+        )
+        val_metadata = (
+            build_index(
+                val_data,
+                vocab_obj,
+                index_dir,
+                "validation",
+                force=rebuild_index,
+                progress=True,
+            )
+            if val_data
+            else None
+        )
+    barrier()
+    train_index_path = str(Path(index_dir) / "train.index.json")
+    val_index_path = str(Path(index_dir) / "validation.index.json") if val_data else None
+    if not is_main:
+        train_metadata = IndexMetadata.load(train_index_path)
+        val_metadata = IndexMetadata.load(val_index_path) if val_index_path else None
+
+    stats = CorpusStats(
+        n_files=len(data),
+        n_seqs=train_metadata.rows,
+        n_tokens=train_metadata.tokens,
+        avg_len=max(1, int(train_metadata.mean_length)),
+        p50=train_metadata.p50_length,
+        p99=train_metadata.p99_length,
+        max_len=train_metadata.max_length,
+        vocab_size=vocab_obj.size,
+    )
+    if is_main:
+        typer.echo(
+            f"[index] train={stats.n_seqs:,} sequences {stats.n_tokens:,} tokens "
+            f"(mean={train_metadata.mean_length:.2f} p50={stats.p50} "
+            f"p99={stats.p99} max={stats.max_len})"
+        )
+        if val_metadata is not None:
+            typer.echo(
+                f"[index] validation={val_metadata.rows:,} sequences {val_metadata.tokens:,} tokens"
             )
 
     sug = suggest_config(stats, gpus=world_size, tokens_per_param=tokens_per_param)
 
-    def pick(user, auto):
+    def pick(user: int, auto: int) -> tuple[int, bool]:
         return (user, False) if user else (auto, True)
 
     r_layers, auto_layers = pick(layers, sug["layers"])
     r_d_model, auto_d_model = pick(d_model, sug["d_model"])
     r_heads, auto_heads = pick(heads, sug["heads"])
     r_max_seq, auto_max_seq = pick(max_seq, sug["max_seq"])
-    r_max_steps, auto_max_steps = pick(max_steps, sug["max_steps"])
     r_batch, auto_batch = pick(batch_size, sug["batch_size"])
-    # d_ff and lr depend on d_model, so re-derive if d_model was overridden
-    # but they weren't, instead of using the suggested value.
     if d_ff:
         r_d_ff, auto_d_ff = d_ff, False
     else:
@@ -118,12 +267,7 @@ def pretrain(
         r_lr, auto_lr = lr, False
     else:
         r_lr, auto_lr = default_lr(r_d_model), True
-    if warmup_steps >= 0:
-        r_warmup, auto_warmup = warmup_steps, False
-    else:
-        r_warmup, auto_warmup = min(2000, max(200, r_max_steps // 20)), True
-
-    checkpoint_arch = init_state["config"] if init_state is not None else None
+    checkpoint_arch = checkpoint_state["config"] if checkpoint_state is not None else None
     if checkpoint_arch is not None:
         checkpoint_values = {
             "layers": int(checkpoint_arch["n_layers"]),
@@ -156,17 +300,56 @@ def pretrain(
                 f"{checkpoint_max_seq}"
             )
         if not max_seq:
-            r_max_seq = max(checkpoint_max_seq, sug["max_seq"])
+            r_max_seq = checkpoint_max_seq if resume else max(checkpoint_max_seq, sug["max_seq"])
             auto_max_seq = True
         if lr <= 0:
             r_lr, auto_lr = 1e-4, True
-        if warmup_steps < 0:
-            r_warmup, auto_warmup = min(1000, max(200, r_max_steps // 100)), True
+        if not batch_size and not resume:
+            # A conservative starting point for the 12x512 checkpoint on 16 GB GPUs.
+            r_batch = min(r_batch, 64)
+            auto_batch = True
 
-    est_params = estimate_params(vocab_obj.size, r_layers, r_d_model, r_d_ff)
-    tokens_per_step = r_batch * world_size * stats.avg_len
-    passes = r_max_steps * tokens_per_step / max(1, stats.n_tokens)
-    target_tokens = int(20 * est_params)
+    if resume and resume_run:
+        if not batch_size:
+            r_batch = int(resume_run["batch_size_per_rank"])
+            auto_batch = True
+        if not grad_accum_steps:
+            grad_accum_steps = int(resume_run["grad_accum_steps"])
+        if not max_steps:
+            max_steps = int(resume_run["max_steps"])
+        if warmup_steps < 0:
+            warmup_steps = int(resume_run["warmup_steps"])
+        if seed == 0:
+            seed = int(resume_run["seed"])
+        if lr <= 0:
+            r_lr = float(resume_run["lr"])
+            auto_lr = True
+
+    if grad_accum_steps:
+        r_accum = grad_accum_steps
+        auto_accum = False
+    else:
+        r_accum = max(1, math.ceil(global_batch_sequences / (r_batch * world_size)))
+        auto_accum = True
+    microbatches_per_epoch = math.ceil(stats.n_seqs / (r_batch * world_size))
+    steps_per_epoch = math.ceil(microbatches_per_epoch / r_accum)
+    if max_steps:
+        r_max_steps = max_steps
+        auto_max_steps = False
+    else:
+        r_max_steps = max(1, math.ceil(epochs * steps_per_epoch))
+        auto_max_steps = True
+    if warmup_steps >= 0:
+        r_warmup, auto_warmup = warmup_steps, False
+    elif checkpoint_arch is not None:
+        r_warmup = min(1000, max(200, r_max_steps // 100))
+        auto_warmup = True
+    else:
+        r_warmup = min(2000, max(200, r_max_steps // 20))
+        auto_warmup = True
+
+    effective_batch = r_batch * world_size * r_accum
+    passes = r_max_steps / max(1, steps_per_epoch)
 
     def tag(is_auto: bool) -> str:
         return "auto" if is_auto else "user"
@@ -181,43 +364,54 @@ def pretrain(
         typer.echo(f"  heads         = {r_heads:<10} ({arch_tag(auto_heads)})")
         typer.echo(f"  d_ff          = {r_d_ff:<10} ({arch_tag(auto_d_ff)})")
         typer.echo(f"  max_seq       = {r_max_seq:<10} ({tag(auto_max_seq)})")
-        typer.echo(f"  batch_size    = {r_batch:<10} ({tag(auto_batch)}, per GPU × {world_size} = {tokens_per_step/1000:.0f}k tokens/step)")
+        typer.echo(f"  microbatch    = {r_batch:<10} ({tag(auto_batch)}, per GPU)")
+        typer.echo(
+            f"  accumulation  = {r_accum:<10} ({tag(auto_accum)}, "
+            f"effective global sequences={effective_batch:,})"
+        )
         typer.echo(f"  lr            = {r_lr:<10.2e} ({tag(auto_lr)})")
         typer.echo(f"  warmup_steps  = {r_warmup:<10} ({tag(auto_warmup)})")
-        typer.echo(f"  max_steps     = {r_max_steps:<10} ({tag(auto_max_steps)}, ≈{passes:.1f} passes over train)")
-        data_ratio = stats.n_tokens / max(1, est_params)
         typer.echo(
-            f"[model] est. params = {est_params/1e6:.2f}M  "
-            f"(sizing @ {tokens_per_param:.0f} tok/param; "
-            f"corpus = {data_ratio:.1f} tok/param, trained ≈{passes:.1f}× ≈ "
-            f"{passes * data_ratio:.0f} tok/param)"
+            f"  max_steps     = {r_max_steps:<10} ({tag(auto_max_steps)}, "
+            f"approximately {passes:.2f} passes)"
         )
 
-    _pretrain(
-        data_path=data if len(data) > 1 else data[0],
-        vocab=vocab_obj,
-        layers=r_layers,
-        d_model=r_d_model,
-        heads=r_heads,
-        d_ff=r_d_ff,
-        max_seq=r_max_seq,
-        dropout=dropout,
-        max_steps=r_max_steps,
-        batch_size=r_batch,
-        lr=r_lr,
-        warmup_steps=r_warmup,
-        grad_clip=grad_clip,
-        z_loss=z_loss,
-        val_fraction=val_fraction,
-        val_every=val_every,
-        patience=patience,
-        compile_model=compile_model,
-        checkpoint_dir=checkpoint_dir,
-        checkpoint_every=checkpoint_every,
-        log_every=log_every,
-        wandb_project=wandb_project,
-        init_checkpoint=init_checkpoint,
-    )
+    try:
+        _pretrain(
+            train_index=train_index_path,
+            val_index=val_index_path,
+            vocab=vocab_obj,
+            layers=r_layers,
+            d_model=r_d_model,
+            heads=r_heads,
+            d_ff=r_d_ff,
+            max_seq=r_max_seq,
+            dropout=dropout,
+            max_steps=r_max_steps,
+            batch_size=r_batch,
+            grad_accum_steps=r_accum,
+            lr=r_lr,
+            warmup_steps=r_warmup,
+            weight_decay=weight_decay,
+            label_smoothing=label_smoothing,
+            grad_clip=grad_clip,
+            z_loss=z_loss,
+            val_every=val_every,
+            patience=patience,
+            precision=precision,
+            compile_model=compile_model,
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_every=checkpoint_every,
+            log_every=log_every,
+            num_workers=num_workers,
+            seed=seed,
+            wandb_project=wandb_project,
+            init_checkpoint=init_checkpoint,
+            resume_checkpoint=resume,
+        )
+    except BaseException:
+        cleanup_ddp()
+        raise
 
 
 @app.command()
@@ -225,7 +419,10 @@ def rl(
     checkpoint: str = typer.Argument(..., help="Pretrained checkpoint"),
     data: str = typer.Argument(..., help="Dataset .bin (for reference model)"),
     vocab: str = typer.Option(None, help="Vocab JSON (default: use vocab from checkpoint)"),
-    objectives: str = typer.Option(..., help="Import path to objectives factory, e.g. mtrl.objectives:build"),
+    objectives: str = typer.Option(
+        ...,
+        help="Import path to objectives factory, e.g. mtrl.objectives:build",
+    ),
     iterations: int = typer.Option(10000, help="Number of RL iterations"),
     batch_size: int = typer.Option(512, help="Batch size (total across all GPUs)"),
     lr: float = typer.Option(1e-5, help="Learning rate"),

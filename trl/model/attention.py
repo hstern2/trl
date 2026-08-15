@@ -65,7 +65,7 @@ class Attention(nn.Module):
 
         # Concatenate with cache
         if kv_cache is not None:
-            # Cache is (B, n_heads, cached_len, head_dim) -> transpose to (B, cached_len, n_heads, head_dim)
+            # Cache is (B, heads, cached_len, head_dim); transpose to sequence-major.
             prev_k = kv_cache[0].transpose(1, 2)
             prev_v = kv_cache[1].transpose(1, 2)
             k = torch.cat([prev_k, k], dim=1)
@@ -76,14 +76,22 @@ class Attention(nn.Module):
 
         if HAS_FLASH and x.is_cuda and self.training:
             # flash_attn_func expects (B, S, H, D) and handles causal masking
-            out = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0.0, causal=True)
+            out = flash_attn_func(
+                q,
+                k,
+                v,
+                dropout_p=self.dropout if self.training else 0.0,
+                causal=True,
+            )
         else:
             # Transpose to (B, n_heads, seq, head_dim) for scaled_dot_product_attention
             q = q.transpose(1, 2)
             k_t = k.transpose(1, 2)
             v_t = v.transpose(1, 2)
             out = F.scaled_dot_product_attention(
-                q, k_t, v_t,
+                q,
+                k_t,
+                v_t,
                 is_causal=(kv_cache is None),
                 dropout_p=self.dropout if self.training else 0.0,
             )

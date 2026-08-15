@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -111,9 +112,6 @@ class Objectives:
 
     def get_rewards(self, scored: list[ScoredItem]) -> np.ndarray:
         """Compute scalar rewards from scored items using Pareto ranking."""
-        obj_names = [o.name for o in self.objectives]
-        directions = [o.direction for o in self.objectives]
-
         # Build score matrix: (n_items, n_objectives), normalized
         n = len(scored)
         m = len(self.objectives)

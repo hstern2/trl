@@ -16,6 +16,8 @@ checkpoints_rl/
 *.pt
 *.pth
 *.bin
+*.index.json
+.trl-index/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/

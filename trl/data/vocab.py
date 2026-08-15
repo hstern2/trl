@@ -4,7 +4,6 @@ import json
 from collections import Counter
 from pathlib import Path
 
-
 PAD = 0
 BOS = 1
 EOS = 2
@@ -52,11 +51,7 @@ class Vocab:
 
     def decode(self, ids: list[int]) -> list[str]:
         """Convert integer IDs back to token strings, stripping special tokens."""
-        return [
-            self.id_to_token[i]
-            for i in ids
-            if i not in (PAD, BOS, EOS)
-        ]
+        return [self.id_to_token[i] for i in ids if i not in (PAD, BOS, EOS)]
 
     def save(self, path: str) -> None:
         """Save vocabulary to JSON."""

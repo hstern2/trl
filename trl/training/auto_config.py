@@ -23,9 +23,11 @@ class CorpusStats:
 
 
 def scan_corpora(paths: list[str], min_freq: int = 1) -> tuple[CorpusStats, Vocab]:
-    """One pass over the JSONL corpora: collect length stats and build a Vocab."""
+    """Collect corpus statistics and a vocabulary with bounded memory."""
     counts: Counter[str] = Counter()
-    lens: list[int] = []
+    length_counts: Counter[int] = Counter()
+    n = 0
+    total = 0
     for path in paths:
         with open(path) as f:
             for line in f:
@@ -34,8 +36,10 @@ def scan_corpora(paths: list[str], min_freq: int = 1) -> tuple[CorpusStats, Voca
                     continue
                 tokens = json.loads(line)
                 counts.update(tokens)
-                lens.append(len(tokens) + 2)  # wrap with BOS/EOS
-    lens.sort()
+                length = len(tokens) + 2  # wrap with BOS/EOS
+                length_counts[length] += 1
+                n += 1
+                total += length
 
     token_to_id: dict[str, int] = {}
     for tok in SPECIAL_TOKENS:
@@ -44,16 +48,25 @@ def scan_corpora(paths: list[str], min_freq: int = 1) -> tuple[CorpusStats, Voca
         if c >= min_freq:
             token_to_id[tok] = len(token_to_id)
 
-    n = len(lens)
-    total = sum(lens)
+    def percentile(q: float) -> int:
+        if n == 0:
+            return 0
+        target = min(n - 1, int(q * n))
+        seen = 0
+        for length in sorted(length_counts):
+            seen += length_counts[length]
+            if seen > target:
+                return length
+        raise AssertionError("length histogram is inconsistent")
+
     stats = CorpusStats(
         n_files=len(paths),
         n_seqs=n,
         n_tokens=total,
         avg_len=max(1, total // max(1, n)),
-        p50=lens[n // 2] if n else 0,
-        p99=lens[min(n - 1, int(0.99 * n))] if n else 0,
-        max_len=lens[-1] if n else 0,
+        p50=percentile(0.50),
+        p99=percentile(0.99),
+        max_len=max(length_counts, default=0),
         vocab_size=len(token_to_id),
     )
     return stats, Vocab(token_to_id)
