@@ -7,6 +7,64 @@ app = typer.Typer(
 )
 
 
+@app.command("index")
+def index_corpora(
+    data: list[str] = typer.Argument(..., help="One or more training JSONL files"),
+    val_data: list[str] = typer.Option(
+        [],
+        "--val-data",
+        help="Primary validation JSONL file; repeat for multiple files",
+    ),
+    shadow_val_data: list[str] = typer.Option(
+        [],
+        "--shadow-val-data",
+        help="Shadow validation JSONL file; repeat for multiple files",
+    ),
+    vocab: str = typer.Option(..., help="Existing vocabulary JSON"),
+    index_dir: str = typer.Option(".trl-index", help="Output index directory"),
+    rebuild_index: bool = typer.Option(
+        False,
+        "--rebuild-index",
+        help="Rebuild indices even when source fingerprints match",
+    ),
+) -> None:
+    """Build or validate reusable corpus indices without initializing DDP."""
+    from pathlib import Path
+
+    from trl.data.dataset import build_index
+    from trl.data.vocab import Vocab
+
+    vocab_path = Path(vocab)
+    if not vocab_path.is_file():
+        raise typer.BadParameter(f"vocabulary does not exist: {vocab_path}")
+    vocab_obj = Vocab.load(str(vocab_path))
+    typer.echo(f"[vocab] {vocab_path} ({vocab_obj.size} tokens)")
+    typer.echo(
+        f"[index] {'building or validating' if rebuild_index else 'validating or reusing'} "
+        f"indices in {index_dir}"
+    )
+    groups = (
+        ("train", data),
+        ("validation", val_data),
+        ("shadow_validation", shadow_val_data),
+    )
+    for name, paths in groups:
+        if not paths:
+            continue
+        metadata = build_index(
+            paths,
+            vocab_obj,
+            index_dir,
+            name,
+            force=rebuild_index,
+            progress=True,
+        )
+        typer.echo(
+            f"[index] {name}={metadata.rows:,} sequences "
+            f"{metadata.tokens:,} tokens"
+        )
+
+
 @app.command()
 def pretrain(
     data: list[str] = typer.Argument(..., help="One or more JSONL corpus files"),

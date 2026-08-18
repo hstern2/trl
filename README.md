@@ -125,6 +125,19 @@ uv run torchrun --standalone --nproc_per_node=2 -m trl pretrain train.jsonl \
   --index-dir .trl-index
 ```
 
+For a corpus whose first index build can exceed the distributed process-group
+timeout, build the reusable indices before launching `torchrun`:
+
+```bash
+uv run python -m trl index train.jsonl \
+  --val-data validation.jsonl \
+  --vocab vocab.json \
+  --index-dir .trl-index
+```
+
+The subsequent `pretrain` command validates and reuses those files without
+rescanning the corpus.
+
 If the vocabulary path does not exist, rank 0 builds it from all supplied
 training and validation files. Without an initialization checkpoint, the CLI
 selects a model from corpus statistics. `--max-steps` overrides the default
