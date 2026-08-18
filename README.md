@@ -130,6 +130,11 @@ training and validation files. Without an initialization checkpoint, the CLI
 selects a model from corpus statistics. `--max-steps` overrides the default
 `--epochs 1` budget. Use `python -m trl pretrain --help` for all options.
 
+Use `--val-at-start` to establish the warm-start loss before optimization.
+`--shadow-val-data` adds a separately reported validation view that never
+affects best-checkpoint selection or early stopping; control its cadence with
+`--shadow-val-every`.
+
 ## Sampling
 
 ```bash

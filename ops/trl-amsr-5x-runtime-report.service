@@ -1,0 +1,7 @@
+[Unit]
+Description=Record AMSR five-traversal training runtime
+After=trl-amsr-5x.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/ubuntu/trl/ops/record_runtime.py finish --output /home/ubuntu/trl-runs/amsr-5x-continued/runtime.json --journal-unit trl-amsr-5x.service

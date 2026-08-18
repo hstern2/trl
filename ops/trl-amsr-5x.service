@@ -1,0 +1,19 @@
+[Unit]
+Description=AMSR five-traversal continued pretraining
+After=network-online.target
+OnSuccess=trl-amsr-5x-runtime-report.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/trl
+Environment=PYTHONUNBUFFERED=1
+Environment=OMP_NUM_THREADS=1
+ExecStartPre=/usr/bin/python3 /home/ubuntu/trl/ops/record_runtime.py start --output /home/ubuntu/trl-runs/amsr-5x-continued/runtime.json
+ExecStart=/home/ubuntu/trl-train-3/train_5x_on_cjm.sh
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=300
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target

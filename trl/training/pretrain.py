@@ -104,6 +104,7 @@ def pretrain(
     train_index: str,
     val_index: str | None,
     vocab: Vocab | str,
+    shadow_val_index: str | None = None,
     layers: int = 8,
     d_model: int = 512,
     heads: int = 8,
@@ -120,6 +121,8 @@ def pretrain(
     grad_clip: float = 1.0,
     z_loss: float = 1e-4,
     val_every: int = 10_000,
+    shadow_val_every: int = 0,
+    val_at_start: bool = False,
     patience: int = 10,
     precision: str = "auto",
     compile_model: bool = True,
@@ -154,7 +157,14 @@ def pretrain(
         vocab = Vocab.load(vocab)
     train_ds = IndexedTokenDataset(train_index)
     val_ds = IndexedTokenDataset(val_index) if val_index is not None else None
-    for name, dataset in (("training", train_ds), ("validation", val_ds)):
+    shadow_val_ds = (
+        IndexedTokenDataset(shadow_val_index) if shadow_val_index is not None else None
+    )
+    for name, dataset in (
+        ("training", train_ds),
+        ("validation", val_ds),
+        ("shadow validation", shadow_val_ds),
+    ):
         if dataset is None:
             continue
         if dataset.metadata.vocab_size != vocab.size:
@@ -246,6 +256,18 @@ def pretrain(
             seed=seed,
         )
         val_sampler.set_epoch(0)
+    shadow_val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor]] | None = None
+    if shadow_val_ds is not None:
+        shadow_val_loader, shadow_val_sampler = get_indexed_dataloader(
+            shadow_val_ds,
+            batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            num_replicas=world_size,
+            rank=rank,
+            seed=seed,
+        )
+        shadow_val_sampler.set_epoch(0)
 
     microbatches_per_epoch = len(train_sampler)
     optimizer_steps_per_epoch = math.ceil(microbatches_per_epoch / grad_accum_steps)
@@ -268,6 +290,11 @@ def pretrain(
         "patience": patience,
         "compile_model": compile_model,
     }
+    if shadow_val_ds is not None:
+        run_config["shadow_val_index_sha256"] = _index_fingerprint(shadow_val_ds)
+        run_config["shadow_val_every"] = shadow_val_every
+    if val_at_start:
+        run_config["val_at_start"] = True
 
     step = 0
     epoch = 0
@@ -277,6 +304,7 @@ def pretrain(
     global_tokens_seen = 0
     global_sequences_seen = 0
     last_val_step = -1
+    last_shadow_val_step = -1
     if resume_checkpoint is not None:
         checkpoint = load_training_checkpoint(
             resume_checkpoint,
@@ -300,6 +328,7 @@ def pretrain(
         global_tokens_seen = int(state.get("global_tokens_seen", 0))
         global_sequences_seen = int(state.get("global_sequences_seen", 0))
         last_val_step = int(state.get("last_val_step", -1))
+        last_shadow_val_step = int(state.get("last_shadow_val_step", -1))
 
     def training_state() -> dict[str, Any]:
         return {
@@ -310,6 +339,7 @@ def pretrain(
             "global_tokens_seen": global_tokens_seen,
             "global_sequences_seen": global_sequences_seen,
             "last_val_step": last_val_step,
+            "last_shadow_val_step": last_shadow_val_step,
         }
 
     Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
@@ -336,6 +366,7 @@ def pretrain(
         effective_batch = batch_size * world_size * grad_accum_steps
         print(
             f"[setup] train={len(train_ds):,} val={len(val_ds) if val_ds else 0:,} "
+            f"shadow_val={len(shadow_val_ds) if shadow_val_ds else 0:,} "
             f"microbatch={batch_size}×{world_size} accumulate={grad_accum_steps} "
             f"effective_sequences={effective_batch:,} precision={resolved_precision} "
             f"workers={num_workers} compile={compile_model}",
@@ -363,6 +394,74 @@ def pretrain(
         label_smoothing=label_smoothing,
         reduction="sum",
     )
+
+    def save_best_checkpoint() -> None:
+        save_checkpoint(
+            model,
+            optimizer,
+            step,
+            asdict(config),
+            str(Path(checkpoint_dir) / "best.pt"),
+            vocab=vocab.token_to_id,
+            scheduler=scheduler,
+            scaler=scaler,
+            training_state=training_state(),
+            run_config=run_config,
+        )
+
+    def evaluate_primary(label: str, *, baseline: bool = False) -> bool:
+        nonlocal best_val, evals_without_improve, last_val_step
+        assert val_loader is not None
+        val_started = time.perf_counter()
+        val_loss, val_tokens = _evaluate(model, val_loader, device, resolved_precision)
+        last_val_step = step
+        improved = val_loss < best_val - 1e-4
+        if improved:
+            best_val = val_loss
+            evals_without_improve = 0
+        elif not baseline:
+            evals_without_improve += 1
+        if is_main():
+            marker = " *baseline*" if baseline else " *new best*" if improved else ""
+            print(
+                f"[{label}] step {step:,} loss={val_loss:.4f} "
+                f"tokens={val_tokens:,} time={time.perf_counter() - val_started:.1f}s"
+                f"{marker}",
+                flush=True,
+            )
+            if wandb_run:
+                wandb_run.log({"val/loss": val_loss}, step=step)
+        return improved
+
+    def evaluate_shadow(label: str) -> None:
+        nonlocal last_shadow_val_step
+        assert shadow_val_loader is not None
+        val_started = time.perf_counter()
+        val_loss, val_tokens = _evaluate(
+            model,
+            shadow_val_loader,
+            device,
+            resolved_precision,
+        )
+        last_shadow_val_step = step
+        if is_main():
+            print(
+                f"[{label}] step {step:,} loss={val_loss:.4f} "
+                f"tokens={val_tokens:,} time={time.perf_counter() - val_started:.1f}s",
+                flush=True,
+            )
+            if wandb_run:
+                wandb_run.log({"shadow_val/loss": val_loss}, step=step)
+
+    if val_at_start and step == 0:
+        baseline_established = False
+        if val_loader is not None:
+            baseline_established = evaluate_primary("val-start", baseline=True)
+        if shadow_val_loader is not None:
+            evaluate_shadow("shadow-val-start")
+        if baseline_established:
+            save_best_checkpoint()
+
     stop = False
     window_started = time.perf_counter()
     window_ce = 0.0
@@ -498,43 +597,9 @@ def pretrain(
                 window_sequences = 0
 
             if val_loader is not None and val_every and step % val_every == 0:
-                val_started = time.perf_counter()
-                val_loss, val_tokens = _evaluate(
-                    model,
-                    val_loader,
-                    device,
-                    resolved_precision,
-                )
-                last_val_step = step
-                improved = val_loss < best_val - 1e-4
+                improved = evaluate_primary("val")
                 if improved:
-                    best_val = val_loss
-                    evals_without_improve = 0
-                else:
-                    evals_without_improve += 1
-                if is_main():
-                    marker = " *new best*" if improved else ""
-                    print(
-                        f"[val] step {step:,} loss={val_loss:.4f} "
-                        f"tokens={val_tokens:,} time={time.perf_counter() - val_started:.1f}s"
-                        f"{marker}",
-                        flush=True,
-                    )
-                    if wandb_run:
-                        wandb_run.log({"val/loss": val_loss}, step=step)
-                if improved:
-                    save_checkpoint(
-                        model,
-                        optimizer,
-                        step,
-                        asdict(config),
-                        str(Path(checkpoint_dir) / "best.pt"),
-                        vocab=vocab.token_to_id,
-                        scheduler=scheduler,
-                        scaler=scaler,
-                        training_state=training_state(),
-                        run_config=run_config,
-                    )
+                    save_best_checkpoint()
                 if patience and evals_without_improve >= patience:
                     if is_main():
                         print(
@@ -542,6 +607,13 @@ def pretrain(
                             flush=True,
                         )
                     stop = True
+
+            if (
+                shadow_val_loader is not None
+                and shadow_val_every
+                and step % shadow_val_every == 0
+            ):
+                evaluate_shadow("shadow-val")
 
             if checkpoint_every and step % checkpoint_every == 0:
                 save_checkpoint(
@@ -570,31 +642,11 @@ def pretrain(
             batch_in_epoch = 0
 
     if val_loader is not None and last_val_step != step:
-        val_started = time.perf_counter()
-        val_loss, val_tokens = _evaluate(model, val_loader, device, resolved_precision)
-        improved = val_loss < best_val - 1e-4
+        improved = evaluate_primary("val-final")
         if improved:
-            best_val = val_loss
-            evals_without_improve = 0
-        if is_main():
-            print(
-                f"[val-final] step {step:,} loss={val_loss:.4f} tokens={val_tokens:,} "
-                f"time={time.perf_counter() - val_started:.1f}s",
-                flush=True,
-            )
-        if improved:
-            save_checkpoint(
-                model,
-                optimizer,
-                step,
-                asdict(config),
-                str(Path(checkpoint_dir) / "best.pt"),
-                vocab=vocab.token_to_id,
-                scheduler=scheduler,
-                scaler=scaler,
-                training_state=training_state(),
-                run_config=run_config,
-            )
+            save_best_checkpoint()
+    if shadow_val_loader is not None and last_shadow_val_step != step:
+        evaluate_shadow("shadow-val-final")
 
     save_checkpoint(
         model,

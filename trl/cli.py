@@ -15,6 +15,11 @@ def pretrain(
         "--val-data",
         help="Frozen validation JSONL file; repeat for multiple files",
     ),
+    shadow_val_data: list[str] = typer.Option(
+        [],
+        "--shadow-val-data",
+        help="Secondary validation JSONL file; reported separately from model selection",
+    ),
     vocab: str = typer.Option(
         "vocab.json",
         help="Existing vocabulary, or output path when one must be built",
@@ -65,6 +70,15 @@ def pretrain(
         help="Z-loss coefficient for logit stability (0 to disable)",
     ),
     val_every: int = typer.Option(10_000, help="Run full validation every N optimizer steps"),
+    shadow_val_every: int = typer.Option(
+        0,
+        help="Run shadow validation every N steps (0 = final only)",
+    ),
+    val_at_start: bool = typer.Option(
+        False,
+        "--val-at-start",
+        help="Evaluate validation sets at step 0 and establish the warm-start baseline",
+    ),
     patience: int = typer.Option(
         10,
         help="Early stop after N evals with no val improvement (0 to disable)",
@@ -160,8 +174,11 @@ def pretrain(
     vocab_path = Path(vocab)
     if not vocab_path.exists():
         if is_main:
-            typer.echo(f"[vocab] scanning {len(data) + len(val_data)} corpus file(s)")
-            _, built_vocab = scan_corpora([*data, *val_data])
+            typer.echo(
+                f"[vocab] scanning "
+                f"{len(data) + len(val_data) + len(shadow_val_data)} corpus file(s)"
+            )
+            _, built_vocab = scan_corpora([*data, *val_data, *shadow_val_data])
             if checkpoint_state is not None:
                 vocab_obj, _ = merge_checkpoint_vocab(checkpoint_state, built_vocab)
             else:
@@ -221,12 +238,32 @@ def pretrain(
             if val_data
             else None
         )
+        shadow_val_metadata = (
+            build_index(
+                shadow_val_data,
+                vocab_obj,
+                index_dir,
+                "shadow_validation",
+                force=rebuild_index,
+                progress=True,
+            )
+            if shadow_val_data
+            else None
+        )
     barrier()
     train_index_path = str(Path(index_dir) / "train.index.json")
     val_index_path = str(Path(index_dir) / "validation.index.json") if val_data else None
+    shadow_val_index_path = (
+        str(Path(index_dir) / "shadow_validation.index.json")
+        if shadow_val_data
+        else None
+    )
     if not is_main:
         train_metadata = IndexMetadata.load(train_index_path)
         val_metadata = IndexMetadata.load(val_index_path) if val_index_path else None
+        shadow_val_metadata = (
+            IndexMetadata.load(shadow_val_index_path) if shadow_val_index_path else None
+        )
 
     stats = CorpusStats(
         n_files=len(data),
@@ -247,6 +284,11 @@ def pretrain(
         if val_metadata is not None:
             typer.echo(
                 f"[index] validation={val_metadata.rows:,} sequences {val_metadata.tokens:,} tokens"
+            )
+        if shadow_val_metadata is not None:
+            typer.echo(
+                f"[index] shadow_validation={shadow_val_metadata.rows:,} sequences "
+                f"{shadow_val_metadata.tokens:,} tokens"
             )
 
     sug = suggest_config(stats, gpus=world_size, tokens_per_param=tokens_per_param)
@@ -380,6 +422,7 @@ def pretrain(
         _pretrain(
             train_index=train_index_path,
             val_index=val_index_path,
+            shadow_val_index=shadow_val_index_path,
             vocab=vocab_obj,
             layers=r_layers,
             d_model=r_d_model,
@@ -397,6 +440,8 @@ def pretrain(
             grad_clip=grad_clip,
             z_loss=z_loss,
             val_every=val_every,
+            shadow_val_every=shadow_val_every,
+            val_at_start=val_at_start,
             patience=patience,
             precision=precision,
             compile_model=compile_model,
