@@ -533,7 +533,12 @@ def rl(
     pareto_lambda: float = typer.Option(0.1, help="Pareto reward mixing weight"),
     temperature: float = typer.Option(1.0, help="Initial sampling temperature"),
     temperature_final: float = typer.Option(0.8, help="Final sampling temperature (linear anneal)"),
-    replay_fraction: float = typer.Option(0.1, help="Fraction of batch from replay buffer"),
+    replay_fraction: float = typer.Option(
+        0.0, help="Reserved for future replay support; currently must be 0"
+    ),
+    precision: str = typer.Option("auto", help="Precision: auto, fp32, fp16, or bf16"),
+    checkpoint_every: int = typer.Option(100, help="Save checkpoint every N iterations"),
+    log_every: int = typer.Option(10, help="Report progress every N iterations"),
     checkpoint_dir: str = typer.Option("checkpoints_rl/", help="Checkpoint output directory"),
     wandb_project: str | None = typer.Option(None, help="W&B project name (disabled if unset)"),
 ) -> None:
@@ -552,6 +557,9 @@ def rl(
         temperature=temperature,
         temperature_final=temperature_final,
         replay_fraction=replay_fraction,
+        precision=precision,
+        checkpoint_every=checkpoint_every,
+        log_every=log_every,
         checkpoint_dir=checkpoint_dir,
         wandb_project=wandb_project,
     )
