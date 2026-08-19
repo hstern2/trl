@@ -3,6 +3,10 @@
 Domain-agnostic training for autoregressive token-sequence transformers, with
 multi-objective REINFORCE fine-tuning.
 
+`trl` operates only on token IDs and user-supplied objective plug-ins. It has
+no AMSR, chemistry, or molecule dependency; application packages such as
+`mtrl` provide domain-specific decoding, validation, and scoring.
+
 ## What is implemented
 
 - Decoder-only Transformer with RoPE, SwiGLU, RMSNorm, tied embeddings, and
@@ -29,80 +33,6 @@ uv sync --extra dev
 headers; for example, `python3.12-dev` on Ubuntu. If `Python.h` or Triton is
 unavailable, training reports that fact and falls back to eager mode before the
 first model step.
-
-## AMSR continued-pretraining run
-
-On the two 16 GB V100 node, the measured safe configuration is 256 sequences
-per GPU and two accumulation microbatches: an effective global batch of 1,024
-sequences. A 512-sequence microbatch exhausts the GPU on long rows.
-
-```bash
-cd /home/ubuntu/trl
-
-uv run torchrun --standalone --nproc_per_node=2 -m trl pretrain \
-  /home/ubuntu/trl-train-3/out/corpus/train/tokens.jsonl \
-  --val-data /home/ubuntu/trl-train-3/out/corpus/validation/tokens.jsonl \
-  --vocab /home/ubuntu/trl-train-3/out/corpus/vocab.json \
-  --index-dir /home/ubuntu/trl-train-3/index \
-  --init-checkpoint /home/ubuntu/trl-train-3/checkpoints/qmugs_cod_step22000.pt \
-  --batch-size 256 \
-  --grad-accum-steps 2 \
-  --epochs 1 \
-  --lr 1e-4 \
-  --warmup-steps 1000 \
-  --precision fp16 \
-  --no-compile \
-  --val-every 10000 \
-  --checkpoint-every 5000 \
-  --checkpoint-dir /home/ubuntu/trl-runs/amsr-continued
-```
-
-With this corpus, that resolves to 124,541 optimizer steps and consumes all
-127,529,655 training rows exactly once. The prebuilt index contains
-4,958,690,368 model tokens and has a maximum row length of 98.
-
-Resume with the same data and run settings, replacing `--init-checkpoint` with
-the version-2 checkpoint:
-
-```bash
-uv run torchrun --standalone --nproc_per_node=2 -m trl pretrain \
-  /home/ubuntu/trl-train-3/out/corpus/train/tokens.jsonl \
-  --val-data /home/ubuntu/trl-train-3/out/corpus/validation/tokens.jsonl \
-  --vocab /home/ubuntu/trl-train-3/out/corpus/vocab.json \
-  --index-dir /home/ubuntu/trl-train-3/index \
-  --resume /home/ubuntu/trl-runs/amsr-continued/last.pt \
-  --batch-size 256 \
-  --grad-accum-steps 2 \
-  --lr 1e-4 \
-  --warmup-steps 1000 \
-  --precision fp16 \
-  --no-compile \
-  --val-every 10000 \
-  --checkpoint-every 5000 \
-  --checkpoint-dir /home/ubuntu/trl-runs/amsr-continued
-```
-
-The resume loader rejects changes to the model, vocabulary, index fingerprint,
-world size, microbatch, accumulation, precision, step budget, warmup, or seed.
-
-For the long run, install the included user-service template and inspect it
-before starting:
-
-```bash
-mkdir -p ~/.config/systemd/user
-cp ops/trl-amsr.service ops/trl-amsr-runtime-report.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now trl-amsr.service
-journalctl --user -u trl-amsr.service -f
-```
-
-The unit includes `--auto-resume`: on a restart it selects `last.pt`, or the
-highest numbered periodic checkpoint when `last.pt` does not yet exist. The
-original initialization checkpoint is used only when the run directory has no
-training checkpoint. The service initializes `runtime.json` without replacing
-its original timestamp on automatic restarts. When training emits its final
-`[done]` event, `trl-amsr-runtime-report.service` records that event's timestamp
-and the exact elapsed wall-clock duration.
 
 ## Index behavior
 
@@ -155,6 +85,7 @@ uv run trl sample checkpoints/best.pt -n 5000 --temperature 0.8
 ```
 
 The vocabulary is embedded in new checkpoints and is loaded automatically.
+PAD and BOS are never sampled as generated tokens.
 
 ## RL fine-tuning
 

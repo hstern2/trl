@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "trl"
 version = "0.1.0"
-description = "Token-sequence Model + Reinforcement Learning"
+description = "Domain-agnostic token-sequence modeling and reinforcement learning"
 authors = [{ name = "Harry Stern" }]
 license = { file = "LICENSE" }
 readme = "README.md"

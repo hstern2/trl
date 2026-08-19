@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from trl.data.vocab import BOS, EOS
+from trl.data.vocab import BOS, EOS, PAD
 from trl.model.transformer import KVCache, TransformerLM
 
 
@@ -47,6 +47,7 @@ def sample(
     for _ in range(max_len - 1):
         logits, cache = model(tokens, kv_cache=cache)
         logits = logits[:, -1, :] / max(temperature, 1e-8)
+        logits[:, (PAD, BOS)] = float("-inf")
         logits = top_k_top_p_filter(logits, top_k=top_k, top_p=top_p)
 
         probs = F.softmax(logits, dim=-1)
