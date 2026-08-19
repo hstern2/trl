@@ -6,6 +6,8 @@ multi-objective REINFORCE fine-tuning.
 `trl` operates only on token IDs and user-supplied objective plug-ins. It has
 no AMSR, chemistry, or molecule dependency; application packages such as
 `mtrl` provide domain-specific decoding, validation, and scoring.
+The Python library is the primary interface; the CLI is a thin wrapper around
+its generic indexing, training, sampling, and RL functions.
 
 ## What is implemented
 
