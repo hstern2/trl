@@ -125,6 +125,7 @@ def rl_train(
     iterations: int = 10000,
     batch_size: int = 512,
     lr: float = 1e-5,
+    warmup_steps: int = 100,
     kl_beta: float = 0.05,
     pareto_lambda: float = 0.1,
     temperature: float = 1.0,
@@ -152,6 +153,8 @@ def rl_train(
         raise ValueError("replay_fraction is not implemented; set it to 0")
     if checkpoint_every < 0:
         raise ValueError("checkpoint_every must be >= 0")
+    if warmup_steps < 0:
+        raise ValueError("warmup_steps must be >= 0")
     if log_every <= 0:
         raise ValueError("log_every must be > 0")
 
@@ -190,7 +193,7 @@ def rl_train(
         lr=lr,
         betas=(0.9, 0.95),
     )
-    scheduler = get_lr_scheduler(optimizer, warmup_steps=100, total_steps=iterations)
+    scheduler = get_lr_scheduler(optimizer, warmup_steps=warmup_steps, total_steps=iterations)
     scaler = torch.amp.GradScaler("cuda", enabled=resolved_precision == "fp16")
     Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
@@ -207,6 +210,7 @@ def rl_train(
                 "batch_size": batch_size,
                 "precision": resolved_precision,
                 "seed": seed,
+                "warmup_steps": warmup_steps,
             },
         )
 
@@ -332,7 +336,7 @@ def rl_train(
                 vocab=vocab.token_to_id,
                 scheduler=scheduler,
                 scaler=scaler,
-                run_config={"seed": seed},
+                run_config={"seed": seed, "warmup_steps": warmup_steps},
             )
 
     if save_final_checkpoint:
@@ -345,7 +349,7 @@ def rl_train(
             vocab=vocab.token_to_id,
             scheduler=scheduler,
             scaler=scaler,
-            run_config={"seed": seed},
+            run_config={"seed": seed, "warmup_steps": warmup_steps},
         )
 
     if wandb_run:
