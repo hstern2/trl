@@ -1,7 +1,7 @@
 [Unit]
 Description=AMSR corrected original-view low-learning-rate refinement
 After=network-online.target
-OnSuccess=trl-amsr-original-view-refine-runtime-report.service
+OnSuccess=trl-amsr-original-view-refine-runtime-report.service trl-amsr-original-view-refine-postprocess.service
 
 [Service]
 Type=simple

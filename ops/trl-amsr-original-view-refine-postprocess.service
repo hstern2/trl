@@ -1,0 +1,10 @@
+[Unit]
+Description=Select final AMSR original-view refinement checkpoint
+After=trl-amsr-original-view-refine.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/trl
+Environment=PYTHONUNBUFFERED=1
+Environment=OMP_NUM_THREADS=1
+ExecStart=/home/ubuntu/trl-train-3/continue_after_refinement.sh
