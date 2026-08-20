@@ -1,3 +1,5 @@
+import random
+
 import numpy as np
 import pytest
 import torch
@@ -9,6 +11,7 @@ from trl.training.rl_train import (
     _masked_mean,
     _prepare_sequences,
     _score_summary,
+    _seed_all,
 )
 
 
@@ -72,3 +75,13 @@ def test_score_summary_reports_objectives_and_rejection_reasons() -> None:
     assert float(summary["reward_mean"]) > 0
     assert summary["objective_means"] == {"first": 2.0, "second": 4.0}
     assert summary["rejections"] == {"PoseBusters failed": 2}
+
+
+def test_seed_all_is_reproducible() -> None:
+    _seed_all(1234, 2)
+    first = (random.random(), np.random.random(), torch.rand(1).item())
+
+    _seed_all(1234, 2)
+    second = (random.random(), np.random.random(), torch.rand(1).item())
+
+    assert second == first

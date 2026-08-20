@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import random
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
@@ -107,6 +108,16 @@ def _score_summary(scored: list[ScoredItem], objectives: Objectives) -> dict[str
     }
 
 
+def _seed_all(seed: int, rank: int) -> None:
+    """Seed one RL process reproducibly while keeping distributed ranks distinct."""
+    process_seed = seed + rank
+    random.seed(process_seed)
+    np.random.seed(process_seed % (2**32))
+    torch.manual_seed(process_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(process_seed)
+
+
 def rl_train(
     checkpoint_path: str,
     vocab_path: str | None,
@@ -124,9 +135,13 @@ def rl_train(
     log_every: int = 10,
     checkpoint_dir: str = "checkpoints_rl/",
     wandb_project: str | None = None,
+    seed: int = 0,
+    save_final_checkpoint: bool = True,
 ) -> None:
     local_rank = setup_ddp()
     distributed = torch.distributed.is_initialized()
+    rank = torch.distributed.get_rank() if distributed else 0
+    _seed_all(seed, rank)
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     resolved_precision = resolve_precision(precision, device)
     world_size = torch.distributed.get_world_size() if distributed else 1
@@ -191,6 +206,7 @@ def rl_train(
                 **asdict(config),
                 "batch_size": batch_size,
                 "precision": resolved_precision,
+                "seed": seed,
             },
         )
 
@@ -316,19 +332,21 @@ def rl_train(
                 vocab=vocab.token_to_id,
                 scheduler=scheduler,
                 scaler=scaler,
+                run_config={"seed": seed},
             )
 
-    # Save final checkpoint
-    save_checkpoint(
-        policy,
-        optimizer,
-        iterations,
-        asdict(config),
-        str(Path(checkpoint_dir) / "rl_final.pt"),
-        vocab=vocab.token_to_id,
-        scheduler=scheduler,
-        scaler=scaler,
-    )
+    if save_final_checkpoint:
+        save_checkpoint(
+            policy,
+            optimizer,
+            iterations,
+            asdict(config),
+            str(Path(checkpoint_dir) / "rl_final.pt"),
+            vocab=vocab.token_to_id,
+            scheduler=scheduler,
+            scaler=scaler,
+            run_config={"seed": seed},
+        )
 
     if wandb_run:
         wandb_run.finish()

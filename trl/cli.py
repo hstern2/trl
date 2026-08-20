@@ -150,10 +150,7 @@ def index_corpora(
             force=rebuild_index,
             progress=True,
         )
-        typer.echo(
-            f"[index] {name}={metadata.rows:,} sequences "
-            f"{metadata.tokens:,} tokens"
-        )
+        typer.echo(f"[index] {name}={metadata.rows:,} sequences {metadata.tokens:,} tokens")
 
 
 @app.command()
@@ -403,9 +400,7 @@ def pretrain(
     train_index_path = str(Path(index_dir) / "train.index.json")
     val_index_path = str(Path(index_dir) / "validation.index.json") if val_data else None
     shadow_val_index_path = (
-        str(Path(index_dir) / "shadow_validation.index.json")
-        if shadow_val_data
-        else None
+        str(Path(index_dir) / "shadow_validation.index.json") if shadow_val_data else None
     )
     if not is_main:
         train_metadata = IndexMetadata.load(train_index_path)
@@ -629,9 +624,15 @@ def rl(
     ),
     precision: str = typer.Option("auto", help="Precision: auto, fp32, fp16, or bf16"),
     checkpoint_every: int = typer.Option(100, help="Save checkpoint every N iterations"),
+    save_final_checkpoint: bool = typer.Option(
+        True,
+        "--save-final-checkpoint/--no-save-final-checkpoint",
+        help="Write rl_final.pt after the last iteration",
+    ),
     log_every: int = typer.Option(10, help="Report progress every N iterations"),
     checkpoint_dir: str = typer.Option("checkpoints_rl/", help="Checkpoint output directory"),
     wandb_project: str | None = typer.Option(None, help="W&B project name (disabled if unset)"),
+    seed: int = typer.Option(0, help="Random seed for sampling and RL initialization"),
 ) -> None:
     """RL fine-tune with Pareto REINFORCE. Launch: torchrun --nproc_per_node=N -m trl rl ..."""
     from trl.training.rl_train import rl_train
@@ -650,9 +651,11 @@ def rl(
         replay_fraction=replay_fraction,
         precision=precision,
         checkpoint_every=checkpoint_every,
+        save_final_checkpoint=save_final_checkpoint,
         log_every=log_every,
         checkpoint_dir=checkpoint_dir,
         wandb_project=wandb_project,
+        seed=seed,
     )
 
 
