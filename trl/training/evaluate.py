@@ -61,6 +61,15 @@ def evaluate_checkpoint(
     model.to(device)
     del checkpoint, state
 
+    def barrier() -> None:
+        if not distributed:
+            return
+        if device.type == "cuda":
+            assert device.index is not None
+            dist.barrier(device_ids=[device.index])
+        else:
+            dist.barrier()
+
     result: dict[str, Any] = {
         "checkpoint": str(source),
         "checkpoint_step": checkpoint_step,
@@ -94,12 +103,10 @@ def evaluate_checkpoint(
             seed=0,
         )
         sampler.set_epoch(0)
-        if distributed:
-            dist.barrier()
+        barrier()
         started = time.monotonic()
         loss, tokens = _evaluate(model, loader, device, resolved_precision)
-        if distributed:
-            dist.barrier()
+        barrier()
         elapsed = time.monotonic() - started
         result["evaluations"][name] = {
             "loss": loss,
