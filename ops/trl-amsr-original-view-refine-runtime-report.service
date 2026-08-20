@@ -1,0 +1,7 @@
+[Unit]
+Description=Record AMSR original-view refinement runtime
+After=trl-amsr-original-view-refine.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/ubuntu/trl/ops/record_runtime.py finish --output /home/ubuntu/trl-runs/amsr-original-view-refine/runtime.json --journal-unit trl-amsr-original-view-refine.service

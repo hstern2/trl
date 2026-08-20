@@ -1,0 +1,20 @@
+[Unit]
+Description=AMSR corrected original-view low-learning-rate refinement
+After=network-online.target
+OnSuccess=trl-amsr-original-view-refine-runtime-report.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/trl
+Environment=PYTHONUNBUFFERED=1
+Environment=OMP_NUM_THREADS=1
+EnvironmentFile=-/home/ubuntu/trl-train-3/original_view_refine.env
+ExecStartPre=/usr/bin/python3 /home/ubuntu/trl/ops/record_runtime.py start --output /home/ubuntu/trl-runs/amsr-original-view-refine/runtime.json
+ExecStart=/home/ubuntu/trl-train-3/train_original_view_refine_on_cjm.sh
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=300
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target
