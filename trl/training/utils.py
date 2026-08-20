@@ -149,7 +149,8 @@ def save_checkpoint(
         dist.barrier()
 
 
-def _normalized_model_state(checkpoint: dict[str, Any]) -> dict[str, torch.Tensor]:
+def normalized_model_state(checkpoint: dict[str, Any]) -> dict[str, torch.Tensor]:
+    """Return model tensors with DDP/compile wrapper prefixes removed."""
     prefixes = ("module.", "_orig_mod.")
     normalized: dict[str, torch.Tensor] = {}
     for original_name, tensor in checkpoint["model"].items():
@@ -163,6 +164,10 @@ def _normalized_model_state(checkpoint: dict[str, Any]) -> dict[str, torch.Tenso
                     changed = True
         normalized[name] = tensor
     return normalized
+
+
+# Backward-compatible private alias for callers predating the public helper.
+_normalized_model_state = normalized_model_state
 
 
 def load_training_checkpoint(
@@ -187,7 +192,7 @@ def load_training_checkpoint(
             f"{checkpoint.get('world_size', 1)} != {world_size}"
         )
 
-    unwrap_model(model).load_state_dict(_normalized_model_state(checkpoint), strict=True)
+    unwrap_model(model).load_state_dict(normalized_model_state(checkpoint), strict=True)
     optimizer.load_state_dict(checkpoint["optimizer"])
     scheduler.load_state_dict(checkpoint["scheduler"])
     if "scaler" in checkpoint:
@@ -203,7 +208,7 @@ def load_checkpoint(
 ) -> int:
     """Load model and optional optimizer state, returning the step number."""
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    unwrap_model(model).load_state_dict(_normalized_model_state(checkpoint), strict=True)
+    unwrap_model(model).load_state_dict(normalized_model_state(checkpoint), strict=True)
     if optimizer is not None and "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
     return int(checkpoint.get("step", 0))

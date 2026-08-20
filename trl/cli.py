@@ -7,6 +7,97 @@ app = typer.Typer(
 )
 
 
+@app.command("blend-checkpoints")
+def blend_checkpoint_files(
+    output: str = typer.Argument(..., help="Output warm-start/evaluation checkpoint"),
+    checkpoints: list[str] = typer.Argument(..., help="Two or more compatible checkpoints"),
+    weights: list[float] = typer.Option(
+        [],
+        "--weight",
+        help="Convex weight; repeat once per checkpoint (default: equal weights)",
+    ),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Replace an existing output"),
+) -> None:
+    """Blend compatible model weights without optimizer/resume state."""
+    from trl.training.checkpoint_tools import blend_checkpoints
+
+    try:
+        provenance = blend_checkpoints(
+            checkpoints,
+            output,
+            weights or None,
+            overwrite=overwrite,
+        )
+    except (FileExistsError, ValueError) as error:
+        raise typer.BadParameter(str(error)) from error
+    typer.echo(f"[blend] wrote {output}")
+    for source, step, weight in zip(
+        provenance["sources"],
+        provenance["source_steps"],
+        provenance["weights"],
+        strict=True,
+    ):
+        typer.echo(f"[blend] weight={weight:.8f} step={step:,} source={source}")
+
+
+@app.command("evaluate")
+def evaluate_checkpoint_file(
+    checkpoint: str = typer.Argument(..., help="Self-contained model checkpoint"),
+    val_index: str = typer.Option(..., help="Primary validation .index.json"),
+    shadow_val_index: str | None = typer.Option(
+        None,
+        help="Optional randomized-view validation .index.json",
+    ),
+    batch_size: int = typer.Option(256, help="Sequences per GPU"),
+    num_workers: int = typer.Option(4, help="Data-loading workers per rank"),
+    precision: str = typer.Option("auto", help="auto, fp16, bf16, or fp32"),
+    output_json: str | None = typer.Option(None, help="Write rank-zero results as JSON"),
+) -> None:
+    """Compute exact token-weighted held-out loss; supports torchrun."""
+    import json
+    import os
+    from pathlib import Path
+
+    import torch.distributed as dist
+
+    from trl.training.evaluate import evaluate_checkpoint
+    from trl.training.utils import cleanup_ddp
+
+    indexes = {"primary": val_index}
+    if shadow_val_index is not None:
+        indexes["shadow"] = shadow_val_index
+    try:
+        result = evaluate_checkpoint(
+            checkpoint,
+            indexes,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            precision=precision,
+        )
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            for name, evaluation in result["evaluations"].items():
+                typer.echo(
+                    f"[evaluate] {name} loss={evaluation['loss']:.6f} "
+                    f"tokens={evaluation['tokens']:,} "
+                    f"time={evaluation['elapsed_seconds']:.1f}s"
+                )
+            if output_json is not None:
+                destination = Path(output_json).expanduser().resolve()
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                temporary = Path(f"{destination}.tmp.{os.getpid()}")
+                try:
+                    temporary.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+                    os.replace(temporary, destination)
+                finally:
+                    try:
+                        temporary.unlink()
+                    except FileNotFoundError:
+                        pass
+                typer.echo(f"[evaluate] wrote {destination}")
+    finally:
+        cleanup_ddp()
+
+
 @app.command("index")
 def index_corpora(
     data: list[str] = typer.Argument(..., help="One or more training JSONL files"),
